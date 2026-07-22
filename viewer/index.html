@@ -291,11 +291,12 @@ function render() {
       .on("end", (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = d.fy = null; }))
     .on("mouseenter", (e, d) => { highlight(d); showTooltip(e, d); })
     .on("mousemove", e => moveTooltip(e))
-    .on("mouseleave", () => { clearHighlight(); tooltip.style.opacity = 0; })
+    .on("mouseleave", () => { applySelectionHighlight(); tooltip.style.opacity = 0; })
     .on("click", (e, d) => { e.stopPropagation(); selectNode(d); });
 
   labelSel = nodeSel.select("text").style("display", showLabels ? null : "none");
   sim.alpha(0.6).restart();
+  applySelectionHighlight();
   updateSelectionPanel();
   updateHiddenPanel();
 }
@@ -349,6 +350,16 @@ function highlight(d) {
 function clearHighlight() {
   nodeSel.classed("dimmed", false);
   linkSel.classed("dimmed", false);
+}
+// Restores the "connected nodes" dimming for whatever is currently selected
+// (or clears it if nothing is), so it stays active after the mouse leaves --
+// not just while hovering.
+function applySelectionHighlight() {
+  if (selected?.type === "node") {
+    const n = nodes.find(n => n.id === selected.id);
+    if (n) { highlight(n); return; }
+  }
+  clearHighlight();
 }
 
 // ------------------------------------------------------------- selection/hide
