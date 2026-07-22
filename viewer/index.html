@@ -36,20 +36,39 @@
   #loadfile input { width: 100%; }
   #stats { color: var(--muted); margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
 
+  #selection-info { color: var(--muted); margin-bottom: 6px; min-height: 15px; }
+  button { font: 12px var(--mono); background: #1B2230; color: var(--ink);
+    border: 1px solid var(--line); border-radius: 5px; padding: 5px 8px; cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { color: var(--muted); cursor: default; opacity: .5; }
+  .btn-row { display: flex; gap: 6px; }
+
+  .hidden-row { display: flex; align-items: center; gap: 6px; padding: 2px 0;
+    color: var(--muted); }
+  .hidden-row .restore-x { cursor: pointer; color: var(--accent); flex: none;
+    width: 14px; text-align: center; }
+  .hidden-row .hidden-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #hidden-empty { color: var(--muted); font-style: italic; }
+
   #tooltip { position: fixed; pointer-events: none; background: var(--panel);
     border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; max-width: 300px;
-    opacity: 0; transition: opacity .12s; backdrop-filter: blur(6px); }
+    opacity: 0; transition: opacity .12s; backdrop-filter: blur(6px); z-index: 10; }
   #tooltip .t-name { font-weight: 600; }
   #tooltip .t-file, #tooltip .t-meta { color: var(--muted); font-size: 11px; }
   #tooltip .t-sig { color: var(--accent); font-size: 11px; }
+  #tooltip .t-desc { max-width: 220px; }
 
   .hull { stroke-linejoin: round; stroke-linecap: round; pointer-events: none; }
   .hull-label { fill: var(--muted); font-size: 11px; letter-spacing: .2em;
     text-transform: uppercase; pointer-events: none; opacity: .75; }
-  .link { fill: none; }
+  .link { fill: none; pointer-events: none; }
+  .link-hit { fill: none; stroke: transparent; stroke-width: 14px; cursor: pointer; }
+  .link.selected { stroke-width: 3.5px !important; stroke-opacity: 1 !important; }
   .node { cursor: pointer; }
   .node text { fill: var(--ink); font-size: 10px; pointer-events: none;
     paint-order: stroke; stroke: var(--bg); stroke-width: 3px; }
+  .node.selected > circle, .node.selected > rect {
+    filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 4px #fff); }
   .dimmed { opacity: .12; transition: opacity .15s; }
 </style>
 </head>
@@ -65,6 +84,17 @@
   <input type="range" id="spring" min="0.5" max="8" step="0.05" value="1">
   <label class="row" style="margin-top:8px"><input type="checkbox" id="hulls" checked> group bubbles</label>
   <label class="row"><input type="checkbox" id="labels" checked> labels</label>
+  <h2>Selection</h2>
+  <div id="selection-info">click a node or edge to select it</div>
+  <div class="btn-row">
+    <button id="hide-selected" disabled>hide selected</button>
+  </div>
+  <h2>Hidden</h2>
+  <div id="hidden-nodes"></div>
+  <div id="hidden-edges-count" style="color:var(--muted); margin-top:4px;"></div>
+  <div class="btn-row" style="margin-top:6px">
+    <button id="restore-all" disabled>restore all</button>
+  </div>
   <h2>Data</h2>
   <div id="loadfile">load graph.json (or drop it anywhere)<input type="file" accept=".json"></div>
   <div id="stats"></div>
@@ -76,18 +106,31 @@
 <script>
 "use strict";
 
-const ROLE_COLORS = {
-  manager: "#E8B04B", object: "#5B9FE3", ui: "#C792EA", data: "#6FBF73",
-  utility: "#8A93A6", interface: "#45C4B8", scene: "#E06C75", plain: "#5A6675",
+const ROLE_META = {
+  manager:   { color: "#E8B04B", desc: "Autoloaded singleton (Godot [autoload])." },
+  object:    { color: "#5B9FE3", desc: "Nearest Godot base is Node — a plain gameplay object." },
+  ui:        { color: "#C792EA", desc: "Nearest Godot base is Control." },
+  data:      { color: "#6FBF73", desc: "Nearest Godot base is Resource — typically inert data." },
+  utility:   { color: "#8A93A6", desc: "Static class with no instance state." },
+  interface: { color: "#45C4B8", desc: "A C# interface." },
+  scene:     { color: "#E06C75", desc: "A .tscn scene file." },
+  plain:     { color: "#5A6675", desc: "No stronger heuristic matched; an ordinary C# type." },
 };
 const EDGE_STYLE = { // stroke, dasharray, base rest-length padding, spring strength
-  inherits:    { color: "#B48EAD", dash: null,      pad: 60,  strength: 0.7, arrow: true  },
-  implements:  { color: "#45C4B8", dash: "6 4",     pad: 70,  strength: 0.5, arrow: true  },
-  calls:       { color: "#5F6B7A", dash: null,      pad: 40,  strength: 0.35, arrow: false },
-  composes:    { color: "#E8B04B", dash: null,      pad: 50,  strength: 0.5, arrow: false },
-  signal:      { color: "#E06C75", dash: "2 5",     pad: 90,  strength: 0.15, arrow: true  },
-  sceneAttach: { color: "#4A5568", dash: "1 4",     pad: 55,  strength: 0.4, arrow: false },
-  nodeRef:     { color: "#8FBCBB", dash: "8 3 2 3", pad: 60,  strength: 0.3, arrow: false },
+  inherits:    { color: "#B48EAD", dash: null,      pad: 60,  strength: 0.7,  arrow: true,
+    desc: "A's base class is B (A extends B)." },
+  implements:  { color: "#45C4B8", dash: "6 4",     pad: 70,  strength: 0.5,  arrow: true,
+    desc: "A implements interface B." },
+  calls:       { color: "#5F6B7A", dash: null,      pad: 40,  strength: 0.35, arrow: true,
+    desc: "A invokes a method defined on B. Thicker/more opaque lines mean more call sites." },
+  composes:    { color: "#E8B04B", dash: null,      pad: 50,  strength: 0.5,  arrow: true,
+    desc: "A holds a field or property of type B (a “has-a” relationship)." },
+  signal:      { color: "#E06C75", dash: "2 5",     pad: 90,  strength: 0.15, arrow: true,
+    desc: "A listens for a signal declared/emitted by B, via Connect(), a C# event +=, or a Godot .tscn [connection]." },
+  sceneAttach: { color: "#4A5568", dash: "1 4",     pad: 55,  strength: 0.4,  arrow: true,
+    desc: "This .tscn scene node has script B attached to it." },
+  nodeRef:     { color: "#8FBCBB", dash: "8 3 2 3", pad: 60,  strength: 0.3,  arrow: true,
+    desc: "A looks up a typed reference to B, e.g. via GetNode<B>() or FindChild<B>()." },
 };
 
 const svg = d3.select("svg");
@@ -109,9 +152,14 @@ for (const [kind, s] of Object.entries(EDGE_STYLE)) {
 
 svg.call(d3.zoom().scaleExtent([0.15, 5])
   .on("zoom", e => zoomLayer.attr("transform", e.transform)));
+svg.on("click", () => { if (selected) { selected = null; render(); } });
 
 let sim, nodes = [], links = [], adjacency = new Map();
 const enabledKinds = new Set(Object.keys(EDGE_STYLE));
+const hiddenRoles = new Set();
+const hiddenNodeIds = new Set();
+const hiddenEdgeKeys = new Set();
+let selected = null; // { type: "node", id } | { type: "edge", key }
 const groupColor = d3.scaleOrdinal(d3.schemeTableau10.map(c => c));
 
 function radius(n) {
@@ -122,6 +170,8 @@ function radius(n) {
 function restLength(l) {
   return (EDGE_STYLE[l.kind]?.pad ?? 50) * springScale + l.source.r + l.target.r;
 }
+
+function edgeKey(l) { return `${l.from}|${l.to}|${l.kind}|${l.signal ?? ""}`; }
 
 let chargeScale = 1, springScale = 1;
 
@@ -136,10 +186,11 @@ function build(data) {
   adjacency = new Map(nodes.map(n => [n.id, new Set([n.id])]));
   for (const l of links) { adjacency.get(l.from).add(l.to); adjacency.get(l.to).add(l.from); }
 
+  hiddenNodeIds.clear(); hiddenEdgeKeys.clear(); selected = null;
+
   const W = innerWidth, H = innerHeight;
-  sim = d3.forceSimulation(nodes)
-    .force("link", d3.forceLink(links.filter(l => enabledKinds.has(l.kind))).id(d => d.id)
-      .distance(restLength).strength(l => EDGE_STYLE[l.kind]?.strength ?? 0.4))
+  sim = d3.forceSimulation([])
+    .force("link", d3.forceLink([]).id(d => d.id))
     .force("charge", d3.forceManyBody().strength(d => -(40 + d.r * 9) * chargeScale))
     .force("collide", d3.forceCollide(d => d.r + 5).iterations(2))
     .force("x", d3.forceX(W / 2).strength(0.03))
@@ -151,19 +202,23 @@ function build(data) {
   updateStats(data);
 }
 
-// Rebuilds the link force from only the currently-enabled edge kinds, so
-// unchecking an edge kind actually relaxes that spring, not just hides the line.
-function updateLinkForce() {
-  if (!sim) return;
-  sim.force("link", d3.forceLink(links.filter(l => enabledKinds.has(l.kind))).id(d => d.id)
-    .distance(restLength).strength(l => EDGE_STYLE[l.kind]?.strength ?? 0.4));
-  sim.alpha(0.4).restart();
+// Nodes/links currently passing every visibility filter: enabled edge kinds,
+// hidden roles, and individually-hidden nodes/edges.
+function currentGraph() {
+  const activeNodes = nodes.filter(n => !hiddenNodeIds.has(n.id) && !hiddenRoles.has(n.role));
+  const activeIds = new Set(activeNodes.map(n => n.id));
+  const activeLinks = links.filter(l =>
+    enabledKinds.has(l.kind) && !hiddenEdgeKeys.has(edgeKey(l)) &&
+    activeIds.has(l.from) && activeIds.has(l.to));
+  return { activeNodes, activeLinks };
 }
 
-// gentle pull toward each group's centroid so bubbles self-segregate
+// gentle pull toward each group's centroid so bubbles self-segregate;
+// no-ops entirely when "group bubbles" is unchecked.
 function clusterForce(strength) {
   let nodesRef;
   function force(alpha) {
+    if (!groupBubbles) return;
     const centroids = d3.rollup(nodesRef, v => ({
       x: d3.mean(v, d => d.x), y: d3.mean(v, d => d.y),
     }), d => d.group);
@@ -180,19 +235,34 @@ function clusterForce(strength) {
 
 let linkSel, nodeSel, hullSel, labelSel;
 
+// Single entry point for any visibility/selection change: recomputes the
+// active node/link sets, feeds them to the simulation (so hidden/filtered
+// items drop out of physics too, not just the drawing), and redraws.
 function render() {
-  const visible = links.filter(l => enabledKinds.has(l.kind));
+  const { activeNodes, activeLinks } = currentGraph();
 
-  linkSel = linkLayer.selectAll("path").data(visible, l => `${l.from}|${l.to}|${l.kind}|${l.signal ?? ""}`)
-    .join("path")
-    .attr("class", "link")
+  sim.nodes(activeNodes);
+  sim.force("link", d3.forceLink(activeLinks).id(d => d.id)
+    .distance(restLength).strength(l => EDGE_STYLE[l.kind]?.strength ?? 0.4));
+
+  const linkGroups = linkLayer.selectAll("g.linkgrp").data(activeLinks, edgeKey)
+    .join(enter => {
+      const g = enter.append("g").attr("class", "linkgrp");
+      g.append("path").attr("class", "link-hit");
+      g.append("path").attr("class", "link");
+      return g;
+    });
+  linkSel = linkGroups.select(".link")
     .attr("stroke", l => EDGE_STYLE[l.kind].color)
     .attr("stroke-dasharray", l => EDGE_STYLE[l.kind].dash)
     .attr("stroke-width", l => l.kind === "calls" ? Math.min(4, 0.8 + Math.sqrt(l.weight ?? 1) * 0.5) : 1.3)
     .attr("stroke-opacity", l => l.kind === "calls" ? Math.min(0.85, 0.3 + (l.weight ?? 1) * 0.06) : 0.65)
-    .attr("marker-end", l => EDGE_STYLE[l.kind].arrow ? `url(#arrow-${l.kind})` : null);
+    .attr("marker-end", l => EDGE_STYLE[l.kind].arrow ? `url(#arrow-${l.kind})` : null)
+    .classed("selected", l => selected?.type === "edge" && selected.key === edgeKey(l));
+  linkGroups.select(".link-hit")
+    .on("click", (e, d) => { e.stopPropagation(); selectEdge(d); });
 
-  nodeSel = nodeLayer.selectAll("g.node").data(nodes, n => n.id)
+  nodeSel = nodeLayer.selectAll("g.node").data(activeNodes, n => n.id)
     .join(enter => {
       const g = enter.append("g").attr("class", "node");
       g.each(function (n) {
@@ -201,33 +271,38 @@ function render() {
           el.append("rect").attr("x", -n.r).attr("y", -n.r)
             .attr("width", n.r * 2).attr("height", n.r * 2)
             .attr("transform", "rotate(45)").attr("rx", 2)
-            .attr("fill", ROLE_COLORS.scene).attr("fill-opacity", 0.85);
+            .attr("fill", ROLE_META.scene.color).attr("fill-opacity", 0.85);
         } else if (n.kind === "interface") {
           el.append("circle").attr("r", n.r).attr("fill", "var(--bg)")
-            .attr("stroke", ROLE_COLORS.interface).attr("stroke-width", 2)
+            .attr("stroke", ROLE_META.interface.color).attr("stroke-width", 2)
             .attr("stroke-dasharray", "4 3");
         } else {
           el.append("circle").attr("r", n.r)
-            .attr("fill", ROLE_COLORS[n.role] ?? ROLE_COLORS.plain).attr("fill-opacity", 0.92);
+            .attr("fill", ROLE_META[n.role]?.color ?? ROLE_META.plain.color).attr("fill-opacity", 0.92);
         }
         el.append("text").attr("dy", -n.r - 4).attr("text-anchor", "middle").text(n.label);
       });
       return g;
     })
+    .classed("selected", n => selected?.type === "node" && selected.id === n.id)
     .call(d3.drag()
       .on("start", (e, d) => { if (!e.active) sim.alphaTarget(0.25).restart(); d.fx = d.x; d.fy = d.y; })
       .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; })
       .on("end", (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = d.fy = null; }))
     .on("mouseenter", (e, d) => { highlight(d); showTooltip(e, d); })
     .on("mousemove", e => moveTooltip(e))
-    .on("mouseleave", () => { clearHighlight(); tooltip.style.opacity = 0; });
+    .on("mouseleave", () => { clearHighlight(); tooltip.style.opacity = 0; })
+    .on("click", (e, d) => { e.stopPropagation(); selectNode(d); });
 
   labelSel = nodeSel.select("text").style("display", showLabels ? null : "none");
   sim.alpha(0.6).restart();
+  updateSelectionPanel();
+  updateHiddenPanel();
 }
 
 function tick() {
-  linkSel.attr("d", l => `M${l.source.x},${l.source.y}L${edgeTip(l).x},${edgeTip(l).y}`);
+  linkLayer.selectAll("g.linkgrp path")
+    .attr("d", l => `M${l.source.x},${l.source.y}L${edgeTip(l).x},${edgeTip(l).y}`);
   nodeSel.attr("transform", n => `translate(${n.x},${n.y})`);
   drawHulls();
 }
@@ -242,8 +317,8 @@ function edgeTip(l) {
 
 const hullLine = d3.line().curve(d3.curveCatmullRomClosed);
 function drawHulls() {
-  if (!showHulls) { hullLayer.selectAll("*").remove(); return; }
-  const groups = d3.group(nodes.filter(n => n.group && n.group !== "(none)"), n => n.group);
+  if (!groupBubbles) { hullLayer.selectAll("*").remove(); return; }
+  const groups = d3.group(sim.nodes().filter(n => n.group && n.group !== "(none)"), n => n.group);
   const shapes = [];
   for (const [name, members] of groups) {
     if (members.length < 2) continue;
@@ -276,6 +351,61 @@ function clearHighlight() {
   linkSel.classed("dimmed", false);
 }
 
+// ------------------------------------------------------------- selection/hide
+function selectNode(d) {
+  selected = (selected?.type === "node" && selected.id === d.id) ? null : { type: "node", id: d.id };
+  render();
+}
+function selectEdge(d) {
+  const key = edgeKey(d);
+  selected = (selected?.type === "edge" && selected.key === key) ? null : { type: "edge", key };
+  render();
+}
+function updateSelectionPanel() {
+  const info = document.getElementById("selection-info");
+  const btn = document.getElementById("hide-selected");
+  if (!selected) {
+    info.textContent = "click a node or edge to select it";
+    btn.disabled = true;
+    return;
+  }
+  if (selected.type === "node") {
+    const n = nodes.find(n => n.id === selected.id);
+    info.textContent = `selected: ${n?.label ?? selected.id} (node)`;
+  } else {
+    const l = links.find(l => edgeKey(l) === selected.key);
+    info.textContent = l ? `selected: ${l.kind} edge` : "selected: edge";
+  }
+  btn.disabled = false;
+}
+document.getElementById("hide-selected").addEventListener("click", () => {
+  if (!selected) return;
+  if (selected.type === "node") hiddenNodeIds.add(selected.id);
+  else hiddenEdgeKeys.add(selected.key);
+  selected = null;
+  render();
+});
+document.getElementById("restore-all").addEventListener("click", () => {
+  hiddenNodeIds.clear();
+  hiddenEdgeKeys.clear();
+  render();
+});
+function updateHiddenPanel() {
+  const rows = d3.select("#hidden-nodes").selectAll("div.hidden-row")
+    .data(Array.from(hiddenNodeIds), id => id);
+  rows.exit().remove();
+  const entered = rows.enter().append("div").attr("class", "hidden-row");
+  entered.append("span").attr("class", "restore-x").text("×")
+    .on("click", (e, id) => { hiddenNodeIds.delete(id); render(); });
+  entered.append("span").attr("class", "hidden-label");
+  d3.select("#hidden-nodes").selectAll("div.hidden-row").select(".hidden-label")
+    .text(id => nodes.find(n => n.id === id)?.label ?? id);
+
+  document.getElementById("hidden-edges-count").textContent =
+    hiddenEdgeKeys.size ? `${hiddenEdgeKeys.size} edge${hiddenEdgeKeys.size === 1 ? "" : "s"} hidden` : "";
+  document.getElementById("restore-all").disabled = hiddenNodeIds.size === 0 && hiddenEdgeKeys.size === 0;
+}
+
 function showTooltip(e, d) {
   const sigs = [];
   if (d.signalsDeclared?.length) sigs.push(`declares: ${d.signalsDeclared.join(", ")}`);
@@ -287,6 +417,11 @@ function showTooltip(e, d) {
     (d.loc ? ` · ${d.loc} loc` : "") + (d.baseType ? ` · : ${d.baseType}` : "") + `</div>` +
     sigs.map(s => `<div class="t-sig">${s}</div>`).join("") +
     (d.scenes?.length ? `<div class="t-meta">in: ${d.scenes.join(", ")}</div>` : "");
+  tooltip.style.opacity = 1;
+  moveTooltip(e);
+}
+function showDescTooltip(e, title, desc) {
+  tooltip.innerHTML = `<div class="t-name">${title}</div><div class="t-meta t-desc">${desc}</div>`;
   tooltip.style.opacity = 1;
   moveTooltip(e);
 }
@@ -302,7 +437,7 @@ function updateStats(data) {
 }
 
 // ------------------------------------------------------------------ controls
-let showHulls = true, showLabels = true;
+let groupBubbles = true, showLabels = true;
 
 const edgeToggles = d3.select("#edge-toggles");
 for (const [kind, s] of Object.entries(EDGE_STYLE)) {
@@ -310,19 +445,29 @@ for (const [kind, s] of Object.entries(EDGE_STYLE)) {
   row.append("input").attr("type", "checkbox").property("checked", true)
     .on("change", function () {
       this.checked ? enabledKinds.add(kind) : enabledKinds.delete(kind);
-      updateLinkForce();
       render();
     });
   row.append("svg").attr("class", "edgekey").attr("height", 6)
     .append("line").attr("x1", 0).attr("x2", 22).attr("y1", 3).attr("y2", 3)
     .attr("stroke", s.color).attr("stroke-width", 2).attr("stroke-dasharray", s.dash);
   row.append("span").text(kind);
+  row.on("mouseenter", e => showDescTooltip(e, kind, s.desc))
+    .on("mousemove", moveTooltip)
+    .on("mouseleave", () => tooltip.style.opacity = 0);
 }
 const roleLegend = d3.select("#role-legend");
-for (const [role, color] of Object.entries(ROLE_COLORS)) {
+for (const [role, meta] of Object.entries(ROLE_META)) {
   const row = roleLegend.append("label").attr("class", "row");
-  row.append("span").attr("class", "swatch").style("background", color);
+  row.append("input").attr("type", "checkbox").property("checked", true)
+    .on("change", function () {
+      this.checked ? hiddenRoles.delete(role) : hiddenRoles.add(role);
+      render();
+    });
+  row.append("span").attr("class", "swatch").style("background", meta.color);
   row.append("span").text(role);
+  row.on("mouseenter", e => showDescTooltip(e, role, meta.desc))
+    .on("mousemove", moveTooltip)
+    .on("mouseleave", () => tooltip.style.opacity = 0);
 }
 
 d3.select("#charge").on("input", function () {
@@ -337,7 +482,11 @@ d3.select("#spring").on("input", function () {
   sim?.force("link").distance(restLength);
   sim?.alpha(0.4).restart();
 });
-d3.select("#hulls").on("change", function () { showHulls = this.checked; drawHulls(); });
+d3.select("#hulls").on("change", function () {
+  groupBubbles = this.checked;
+  sim?.alpha(0.4).restart();
+  drawHulls();
+});
 d3.select("#labels").on("change", function () {
   showLabels = this.checked; labelSel?.style("display", showLabels ? null : "none");
 });

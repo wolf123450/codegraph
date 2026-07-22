@@ -110,3 +110,11 @@ static classes → `utility`; interfaces → `interface`; everything else → `p
   from size counts and syntax walking; their symbols still participate in resolution.
 - **First run of MSBuildWorkspace** needs the same .NET SDK your Godot project targets;
   watch stderr for `[workspace]` diagnostics if the load is incomplete.
+- **Grouping is directory- or namespace-based only.** `Classifier.ResolveGroup` picks a
+  single path/namespace segment, which only produces a meaningful grouping when the
+  project's folder (or namespace) structure is fairly disciplined. Loosely organized
+  projects end up with arbitrary or noisy groups. Config `groups` overrides exist as an
+  escape hatch per-node, but there's no bulk/rule-based way to define groups (e.g. by
+  base type, by role, by tag, or interactively in the viewer). Worth revisiting —
+  possibly viewer-side manual grouping/regrouping, or additional grouping strategies
+  in `Classifier`.
