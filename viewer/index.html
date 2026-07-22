@@ -60,9 +60,9 @@
   <h2>Roles</h2><div id="role-legend"></div>
   <h2>Physics</h2>
   <div class="slider-label"><span>repulsion</span><span id="charge-val"></span></div>
-  <input type="range" id="charge" min="0.3" max="3" step="0.05" value="1">
+  <input type="range" id="charge" min="0.3" max="10" step="0.05" value="1">
   <div class="slider-label"><span>spring length</span><span id="spring-val"></span></div>
-  <input type="range" id="spring" min="0.5" max="2.5" step="0.05" value="1">
+  <input type="range" id="spring" min="0.5" max="8" step="0.05" value="1">
   <label class="row" style="margin-top:8px"><input type="checkbox" id="hulls" checked> group bubbles</label>
   <label class="row"><input type="checkbox" id="labels" checked> labels</label>
   <h2>Data</h2>
@@ -138,7 +138,7 @@ function build(data) {
 
   const W = innerWidth, H = innerHeight;
   sim = d3.forceSimulation(nodes)
-    .force("link", d3.forceLink(links).id(d => d.id)
+    .force("link", d3.forceLink(links.filter(l => enabledKinds.has(l.kind))).id(d => d.id)
       .distance(restLength).strength(l => EDGE_STYLE[l.kind]?.strength ?? 0.4))
     .force("charge", d3.forceManyBody().strength(d => -(40 + d.r * 9) * chargeScale))
     .force("collide", d3.forceCollide(d => d.r + 5).iterations(2))
@@ -149,6 +149,15 @@ function build(data) {
 
   render();
   updateStats(data);
+}
+
+// Rebuilds the link force from only the currently-enabled edge kinds, so
+// unchecking an edge kind actually relaxes that spring, not just hides the line.
+function updateLinkForce() {
+  if (!sim) return;
+  sim.force("link", d3.forceLink(links.filter(l => enabledKinds.has(l.kind))).id(d => d.id)
+    .distance(restLength).strength(l => EDGE_STYLE[l.kind]?.strength ?? 0.4));
+  sim.alpha(0.4).restart();
 }
 
 // gentle pull toward each group's centroid so bubbles self-segregate
@@ -299,7 +308,11 @@ const edgeToggles = d3.select("#edge-toggles");
 for (const [kind, s] of Object.entries(EDGE_STYLE)) {
   const row = edgeToggles.append("label").attr("class", "row");
   row.append("input").attr("type", "checkbox").property("checked", true)
-    .on("change", function () { this.checked ? enabledKinds.add(kind) : enabledKinds.delete(kind); render(); });
+    .on("change", function () {
+      this.checked ? enabledKinds.add(kind) : enabledKinds.delete(kind);
+      updateLinkForce();
+      render();
+    });
   row.append("svg").attr("class", "edgekey").attr("height", 6)
     .append("line").attr("x1", 0).attr("x2", 22).attr("y1", 3).attr("y2", 3)
     .attr("stroke", s.color).attr("stroke-width", 2).attr("stroke-dasharray", s.dash);
