@@ -16,15 +16,17 @@ public sealed class RoslynExtractor
 {
     private readonly GraphBuilder _graph;
     private readonly string _root;
+    private readonly Config _config;
 
     // symbol identity -> node id, populated in pass 1
     private readonly Dictionary<INamedTypeSymbol, string> _typeIds =
         new(SymbolEqualityComparer.Default);
 
-    public RoslynExtractor(GraphBuilder graph, string projectRoot)
+    public RoslynExtractor(GraphBuilder graph, string projectRoot, Config? config = null)
     {
         _graph = graph;
         _root = Path.GetFullPath(projectRoot);
+        _config = config ?? new Config();
     }
 
     private static bool IsGenerated(string? path) =>
@@ -47,6 +49,7 @@ public sealed class RoslynExtractor
         foreach (var doc in project.Documents)
         {
             if (IsGenerated(doc.FilePath)) continue;
+            if (doc.FilePath is not null && _config.IsExcluded(Rel(doc.FilePath))) continue;
             var model = await doc.GetSemanticModelAsync();
             var rootNode = await doc.GetSyntaxRootAsync();
             if (model is null || rootNode is null || doc.FilePath is null) continue;

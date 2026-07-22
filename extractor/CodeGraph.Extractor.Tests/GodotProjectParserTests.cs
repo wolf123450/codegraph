@@ -182,4 +182,27 @@ public class GodotProjectParserTests
 
         Assert.DoesNotContain(graph.Nodes.Values, n => n.Kind == "scene");
     }
+
+    [Fact]
+    public void ParseSkipsScenesUnderAConfiguredExcludePrefix()
+    {
+        using var dir = new TempProjectDir();
+        var graph = new GraphBuilder();
+        graph.GetOrAddNode("GdUnitPanel", "GdUnitPanel", "class");
+        graph.FileToTypeId["addons/gdUnit4/Panel.cs"] = "GdUnitPanel";
+
+        dir.WriteFile(System.IO.Path.Combine("addons", "gdUnit4", "Panel.tscn"), """
+            [gd_scene load_steps=2 format=3]
+
+            [ext_resource type="Script" path="res://addons/gdUnit4/Panel.cs" id="1_abc"]
+
+            [node name="Panel" type="Control"]
+            script = ExtResource("1_abc")
+            """);
+
+        var config = new Config { Exclude = { "addons/gdUnit4/" } };
+        new GodotProjectParser(graph, dir.Path, config).Parse();
+
+        Assert.DoesNotContain(graph.Nodes.Values, n => n.Kind == "scene");
+    }
 }

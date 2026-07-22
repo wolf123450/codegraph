@@ -50,7 +50,7 @@ async Task<int> RunAsync()
     }
 
     var graph = new GraphBuilder();
-    var extractor = new RoslynExtractor(graph, root);
+    var extractor = new RoslynExtractor(graph, root, config);
 
     foreach (var p in projects)
     {
@@ -64,7 +64,7 @@ async Task<int> RunAsync()
     }
 
     Console.Error.WriteLine("  godot: scenes + autoloads");
-    var godot = new GodotProjectParser(graph, root);
+    var godot = new GodotProjectParser(graph, root, config);
     godot.Parse();
 
     new Classifier(config, godot.AutoloadTypeIds).Classify(graph);

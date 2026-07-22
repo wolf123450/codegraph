@@ -90,13 +90,19 @@ Notes on the abstraction (deliberate imprecision):
   "groupDepth": 2,                 // path segment used when groupBy=directory (0-based)
   "roles":  { "MyGame.AudioDirector": "manager" },   // per-type overrides
   "groups": { "MyGame.SaveService": "infrastructure" },
-  "rolePathPrefixes": { "scripts/ui/": "ui", "scripts/data/": "data" }
+  "rolePathPrefixes": { "scripts/ui/": "ui", "scripts/data/": "data" },
+  "exclude": ["test/", "addons/gdUnit4/"]
 }
 ```
 
 Role heuristics without overrides: autoloads in `project.godot` → `manager`;
 nearest Godot base `Resource` → `data`, `Control` → `ui`, `Node` → `object`;
 static classes → `utility`; interfaces → `interface`; everything else → `plain`.
+
+`exclude` is a list of relative path prefixes (forward-slash, case-insensitive,
+matched from the project root) to leave out entirely — no node, no edges, no
+`.tscn` scan. Useful for test suites and vendored addons that would otherwise
+compile into the graph and add noise unrelated to your game's architecture.
 
 ## Known fiddly bits / TODOs
 

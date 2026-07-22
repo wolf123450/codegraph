@@ -15,13 +15,15 @@ public sealed partial class GodotProjectParser
 {
     private readonly GraphBuilder _graph;
     private readonly string _root;
+    private readonly Config _config;
 
     public HashSet<string> AutoloadTypeIds { get; } = new();
 
-    public GodotProjectParser(GraphBuilder graph, string projectRoot)
+    public GodotProjectParser(GraphBuilder graph, string projectRoot, Config? config = null)
     {
         _graph = graph;
         _root = Path.GetFullPath(projectRoot);
+        _config = config ?? new Config();
     }
 
     [GeneratedRegex("\\[ext_resource type=\"Script\"[^\\]]*?path=\"res://([^\"]+)\"[^\\]]*?id=\"([^\"]+)\"")]
@@ -44,6 +46,8 @@ public sealed partial class GodotProjectParser
         foreach (var tscn in Directory.EnumerateFiles(_root, "*.tscn", SearchOption.AllDirectories))
         {
             if (tscn.Contains($"{Path.DirectorySeparatorChar}.godot{Path.DirectorySeparatorChar}")) continue;
+            var rel = Path.GetRelativePath(_root, tscn).Replace('\\', '/');
+            if (_config.IsExcluded(rel)) continue;
             ParseScene(tscn);
         }
 

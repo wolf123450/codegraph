@@ -51,6 +51,45 @@ public class ConfigTests
         }
     }
 
+    [Theory]
+    [InlineData("test/PlayerCapture.cs", true)]
+    [InlineData("TEST/PlayerCapture.cs", true)]
+    [InlineData("addons/gdUnit4/test/core/discovery/Foo.cs", true)]
+    [InlineData("scripts/test/Foo.cs", false)] // "test/" prefix must match from the root, not anywhere
+    [InlineData("Scripts/Player.cs", false)]
+    public void IsExcludedMatchesConfiguredPrefixesCaseInsensitively(string relPath, bool expected)
+    {
+        var config = new Config { Exclude = { "test/", "addons/gdUnit4/" } };
+
+        Assert.Equal(expected, config.IsExcluded(relPath));
+    }
+
+    [Fact]
+    public void IsExcludedIsFalseWhenNoExcludesConfigured()
+    {
+        var config = new Config();
+
+        Assert.False(config.IsExcluded("test/Anything.cs"));
+    }
+
+    [Fact]
+    public void LoadParsesExcludeList()
+    {
+        var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".json");
+        File.WriteAllText(path, """
+            { "exclude": ["test/", "addons/gdUnit4/"] }
+            """);
+        try
+        {
+            var config = Config.Load(path);
+            Assert.Equal(new[] { "test/", "addons/gdUnit4/" }, config.Exclude);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     [Fact]
     public void LoadToleratesCommentsAndTrailingCommas()
     {

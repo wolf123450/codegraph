@@ -121,6 +121,14 @@ public sealed class Config
     public Dictionary<string, string> Groups { get; set; } = new();
     public Dictionary<string, string> RolePathPrefixes { get; set; } = new();
 
+    /// Path prefixes (relative, forward-slash, case-insensitive) to leave out entirely --
+    /// no node, no edges, no .tscn scan. Matched against the same relative paths used
+    /// elsewhere (e.g. "test/", "addons/gdUnit4/").
+    public List<string> Exclude { get; set; } = new();
+
+    public bool IsExcluded(string relPath) =>
+        Exclude.Any(p => relPath.StartsWith(p, StringComparison.OrdinalIgnoreCase));
+
     public static Config Load(string? path)
     {
         if (path is null || !File.Exists(path)) return new Config();

@@ -51,6 +51,34 @@ public static class RoslynTestProject
 
         return solution.GetProject(projectId)!;
     }
+
+    /// Like Create, but lets each source specify its own path relative to "/root".
+    public static Project CreateAtPaths(params (string relativePath, string source)[] files)
+    {
+        using var workspace = new AdhocWorkspace();
+        var projectId = ProjectId.CreateNewId();
+        var refs = new[]
+        {
+            MetadataReference.CreateFromFile(typeof(object).Assembly.Location),
+            MetadataReference.CreateFromFile(typeof(System.Attribute).Assembly.Location),
+            MetadataReference.CreateFromFile(
+                System.Reflection.Assembly.Load("System.Runtime").Location),
+        };
+
+        var projectInfo = ProjectInfo.Create(
+            projectId, VersionStamp.Default, "TestProject", "TestProject", LanguageNames.CSharp,
+            compilationOptions: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary),
+            metadataReferences: refs);
+
+        var solution = workspace.CurrentSolution.AddProject(projectInfo);
+        solution = solution.AddDocument(DocumentId.CreateNewId(projectId), "Godot.cs", GodotStubs,
+            filePath: "/root/Godot.cs");
+        foreach (var (relativePath, source) in files)
+            solution = solution.AddDocument(DocumentId.CreateNewId(projectId), Path.GetFileName(relativePath), source,
+                filePath: $"/root/{relativePath}");
+
+        return solution.GetProject(projectId)!;
+    }
 }
 
 public class RoslynExtractorTests
@@ -71,6 +99,30 @@ public class RoslynExtractorTests
         var graph = await ExtractAsync("public class Player {}");
 
         Assert.Contains(graph.Nodes.Values, n => n.Label == "Player" && n.Kind == "class");
+    }
+
+    [Fact]
+    public async Task ExcludedPathIsSkippedEntirelyInBothPasses()
+    {
+        var project = RoslynTestProject.CreateAtPaths(
+            ("Player.cs", "public class Player {}"),
+            ("test/PlayerCaptureTest.cs", """
+                public class PlayerCaptureTest
+                {
+                    public void Run() { new Player(); }
+                }
+                """));
+        var graph = new GraphBuilder();
+        var config = new Config { Exclude = { "test/" } };
+        var extractor = new RoslynExtractor(graph, "/root", config);
+        await extractor.CollectTypesAsync(project);
+        await extractor.ExtractEdgesAsync(project);
+
+        Assert.Contains(graph.Nodes.Values, n => n.Label == "Player");
+        Assert.DoesNotContain(graph.Nodes.Values, n => n.Label == "PlayerCaptureTest");
+        // Nothing under test/ should even show up as a caller of Player.
+        var payload = graph.ToSerializable("/root");
+        Assert.DoesNotContain(payload.Edges, e => e.Kind == EdgeKind.Calls);
     }
 
     [Fact]
