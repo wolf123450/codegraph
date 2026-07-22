@@ -135,7 +135,7 @@ public sealed class RoslynExtractor
 
                 ExtractHierarchy(sym, fromId);
                 ExtractMembers(sym, fromId);
-                new BodyWalker(this, model, fromId, _graph.Nodes[fromId]).Visit(decl);
+                new BodyWalker(this, model, fromId, _graph.Nodes[fromId], decl).Visit(decl);
             }
         }
     }
@@ -185,15 +185,23 @@ public sealed class RoslynExtractor
         private readonly SemanticModel _model;
         private readonly string _fromId;
         private readonly GraphNode _fromNode;
+        private readonly SyntaxNode _root;
 
-        public BodyWalker(RoslynExtractor x, SemanticModel model, string fromId, GraphNode fromNode)
+        public BodyWalker(RoslynExtractor x, SemanticModel model, string fromId, GraphNode fromNode, SyntaxNode root)
         {
-            _x = x; _model = model; _fromId = fromId; _fromNode = fromNode;
+            _x = x; _model = model; _fromId = fromId; _fromNode = fromNode; _root = root;
         }
 
-        // Don't descend into nested type declarations; they're handled (or skipped) separately.
-        public override void VisitClassDeclaration(ClassDeclarationSyntax node) { }
-        public override void VisitStructDeclaration(StructDeclarationSyntax node) { }
+        // Don't descend into NESTED type declarations; they're handled (or skipped) separately.
+        // The root declaration itself must still be walked, so only no-op for non-root nodes.
+        public override void VisitClassDeclaration(ClassDeclarationSyntax node)
+        {
+            if (node == _root) base.VisitClassDeclaration(node);
+        }
+        public override void VisitStructDeclaration(StructDeclarationSyntax node)
+        {
+            if (node == _root) base.VisitStructDeclaration(node);
+        }
 
         public override void VisitInvocationExpression(InvocationExpressionSyntax node)
         {

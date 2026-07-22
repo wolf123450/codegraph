@@ -43,6 +43,20 @@ public sealed class GraphEdge
     public string? Signal { get; init; }
 }
 
+public sealed class GraphMeta
+{
+    public required int SchemaVersion { get; init; }
+    public required string GeneratedAt { get; init; }
+    public required string ProjectRoot { get; init; }
+}
+
+public sealed class GraphPayload
+{
+    public required GraphMeta Meta { get; init; }
+    public required List<GraphNode> Nodes { get; init; }
+    public required List<GraphEdge> Edges { get; init; }
+}
+
 public sealed class GraphBuilder
 {
     public Dictionary<string, GraphNode> Nodes { get; } = new();
@@ -70,7 +84,7 @@ public sealed class GraphBuilder
         else _edges[key] = new GraphEdge { From = from, To = to, Kind = kind, Signal = signal };
     }
 
-    public object ToSerializable(string projectRoot)
+    public GraphPayload ToSerializable(string projectRoot)
     {
         // Drop edges whose endpoints didn't materialize as nodes.
         var edges = _edges.Values
@@ -78,16 +92,16 @@ public sealed class GraphBuilder
             .OrderBy(e => e.From).ThenBy(e => e.To).ThenBy(e => e.Kind)
             .ToList();
 
-        return new
+        return new GraphPayload
         {
-            meta = new
+            Meta = new GraphMeta
             {
-                schemaVersion = 1,
-                generatedAt = DateTime.UtcNow.ToString("o"),
-                projectRoot,
+                SchemaVersion = 1,
+                GeneratedAt = DateTime.UtcNow.ToString("o"),
+                ProjectRoot = projectRoot,
             },
-            nodes = Nodes.Values.OrderBy(n => n.Id).ToList(),
-            edges,
+            Nodes = Nodes.Values.OrderBy(n => n.Id).ToList(),
+            Edges = edges,
         };
     }
 

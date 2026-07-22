@@ -15,4 +15,8 @@
     <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="4.9.2" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Remove="CodeGraph.Extractor.Tests/**" />
+  </ItemGroup>
+
 </Project>

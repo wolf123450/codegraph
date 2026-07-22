@@ -1,0 +1,7 @@
+[application]
+
+config/name="MiniProject"
+
+[autoload]
+
+GameManager="*res://GameManager.cs"

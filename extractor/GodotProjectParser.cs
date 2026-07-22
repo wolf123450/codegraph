@@ -24,7 +24,7 @@ public sealed partial class GodotProjectParser
         _root = Path.GetFullPath(projectRoot);
     }
 
-    [GeneratedRegex("""\[ext_resource type="Script"[^\]]*?path="res://([^"]+)"[^\]]*?id="([^"]+)"""")]
+    [GeneratedRegex("\\[ext_resource type=\"Script\"[^\\]]*?path=\"res://([^\"]+)\"[^\\]]*?id=\"([^\"]+)\"")]
     private static partial Regex ExtScriptRx();
 
     [GeneratedRegex("""^\[node name="([^"]+)"[^\]]*\]""", RegexOptions.Multiline)]
@@ -36,7 +36,7 @@ public sealed partial class GodotProjectParser
     [GeneratedRegex("""\[connection signal="(\w+)" from="([^"]*)" to="([^"]*)" method="\w+"[^\]]*\]""")]
     private static partial Regex ConnectionRx();
 
-    [GeneratedRegex("""^\s*[\w/]+="\*?res://([^"]+\.cs)"""", RegexOptions.Multiline)]
+    [GeneratedRegex("^\\s*[\\w/]+=\"\\*?res://([^\"]+\\.cs)\"", RegexOptions.Multiline)]
     private static partial Regex AutoloadRx();
 
     public void Parse()
