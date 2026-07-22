@@ -26,6 +26,15 @@
   #rail h2 { font-size: 10px; font-weight: 600; letter-spacing: .18em; color: var(--muted);
     text-transform: uppercase; margin: 14px 0 6px; }
   #rail h2:first-child { margin-top: 0; }
+  #rail details.section { margin: 0; }
+  #rail details.section > summary { list-style: none; cursor: pointer; user-select: none;
+    display: flex; align-items: center; gap: 5px; font-size: 10px; font-weight: 600;
+    letter-spacing: .18em; color: var(--muted); text-transform: uppercase; margin: 14px 0 6px; }
+  #rail details.section:first-child > summary { margin-top: 0; }
+  #rail details.section > summary::-webkit-details-marker { display: none; }
+  #rail details.section > summary::before { content: "▸"; display: inline-block;
+    font-size: 9px; transition: transform .1s; }
+  #rail details.section[open] > summary::before { transform: rotate(90deg); }
   label.row { display: flex; align-items: center; gap: 7px; padding: 2px 0; cursor: pointer; }
   label.row input { accent-color: var(--accent); }
   .swatch { width: 10px; height: 10px; border-radius: 50%; flex: none; }
@@ -90,17 +99,25 @@
 <body>
 <div id="brand"><b>code</b>·graph</div>
 <div id="rail">
-  <h2>Edges</h2><div id="edge-toggles"></div>
-  <h2>Roles</h2><div id="role-legend"></div>
-  <h2>Groups</h2>
-  <div id="group-list"></div>
-  <div class="btn-row" style="margin-top:6px">
-    <input type="text" id="new-group-name" placeholder="new group name">
-    <button id="new-group-btn">+</button>
-  </div>
-  <div class="btn-row" style="margin-top:6px">
-    <button id="export-groups">export groups</button>
-  </div>
+  <details class="section" open>
+    <summary>Edges</summary>
+    <div id="edge-toggles"></div>
+  </details>
+  <details class="section" open>
+    <summary>Roles</summary>
+    <div id="role-legend"></div>
+  </details>
+  <details class="section" open>
+    <summary>Groups</summary>
+    <div id="group-list"></div>
+    <div class="btn-row" style="margin-top:6px">
+      <input type="text" id="new-group-name" placeholder="new group name">
+      <button id="new-group-btn">+</button>
+    </div>
+    <div class="btn-row" style="margin-top:6px">
+      <button id="export-groups">export groups</button>
+    </div>
+  </details>
   <h2>Physics</h2>
   <div class="slider-label"><span>repulsion</span><span id="charge-val"></span></div>
   <input type="range" id="charge" min="0.3" max="10" step="0.05" value="1">
