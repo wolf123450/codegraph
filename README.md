@@ -4,26 +4,36 @@ Code relationship visualization for Godot 4 C# projects. Two halves:
 
 1. **extractor/** — Roslyn console tool. Loads your `.csproj`/`.sln`, walks the semantic
    model, parses `.tscn` files and `project.godot`, and emits a single `graph.json`.
-2. **viewer/** — a single `index.html` using d3-force. Physics playground: nodes repel,
-   edges act as springs with a minimum rest length, drag anything, group bubbles,
-   edge-kind styling, role color coding, node size by file size.
+2. **viewer/** — a single `index.html` using d3-force, served by `serve.py`. Physics
+   playground: nodes repel, edges act as springs with a minimum rest length, groups
+   repel each other and push away non-members, drag anything, per-node repulsion
+   override, group bubbles, edge-kind styling, role color coding, node size by file
+   size. Multi-membership groups (add/rename/delete/hide, per-node or per-group) are
+   editable live and exportable back into `codegraph.config.json`'s `groups`.
 
 ## Quick start
 
 ```bash
 # Extract (requires .NET 8 SDK; run from anywhere)
 cd extractor
-dotnet run -- /path/to/YourGame.csproj --root /path/to/godot/project --out ../viewer/graph.json
+dotnet run -- /path/to/YourGame.csproj --root /path/to/godot/project --out /path/to/graph.json
 
 # View
 cd ../viewer
-python3 -m http.server 8080
-# open http://localhost:8080
+python serve.py        # http://localhost:8420/ -- fixed port, run once
 ```
 
-The viewer also accepts a `graph.json` via the file picker or drag-and-drop, so you can
-open `index.html` directly from disk without a server. With no data it loads a small
-embedded sample so you can see the physics immediately.
+`serve.py` serves the viewer statically and adds `GET /api/graph?path=<absolute path>`,
+so you don't have to copy each project's `graph.json` next to `index.html`: paste the
+absolute path into the "load" box in the Data section once, and the viewer remembers it
+(along with your groups/physics settings) in `localStorage` and reloads it automatically
+next time you open the page. Binds to `127.0.0.1` only.
+
+The viewer also still accepts a `graph.json` via the file picker or drag-and-drop (no
+path memory for those — browsers don't expose a re-fetchable path for a dropped file),
+or you can open `index.html` directly from disk with no server at all, though `file://`
+blocks `fetch()` so it'll fall back to a small embedded sample instead of any
+`graph.json` sitting next to it.
 
 ## graph.json schema (v1)
 

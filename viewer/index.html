@@ -52,7 +52,7 @@
   button:hover:not(:disabled) { border-color: var(--accent); }
   button:disabled { color: var(--muted); cursor: default; opacity: .5; }
   .btn-row { display: flex; gap: 6px; }
-  #new-group-name { flex: 1; min-width: 0; background: #1B2230; color: var(--ink);
+  #new-group-name, #path-input { flex: 1; min-width: 0; background: #1B2230; color: var(--ink);
     border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px; font: 12px var(--mono); }
 
   .hidden-row { display: flex; align-items: center; gap: 6px; padding: 2px 0;
@@ -120,14 +120,20 @@
   </details>
   <h2>Physics</h2>
   <div class="slider-label"><span>repulsion</span><span id="charge-val"></span></div>
-  <input type="range" id="charge" min="0.3" max="10" step="0.05" value="1">
+  <input type="range" id="charge" min="0.3" max="15" step="0.05" value="1">
   <div class="slider-label"><span>spring length</span><span id="spring-val"></span></div>
-  <input type="range" id="spring" min="0.5" max="8" step="0.05" value="1">
+  <input type="range" id="spring" min="0.5" max="15" step="0.05" value="1">
+  <div class="slider-label"><span>group separation</span><span id="intergroup-val"></span></div>
+  <input type="range" id="intergroup" min="0" max="15" step="0.5" value="3">
   <label class="row" style="margin-top:8px"><input type="checkbox" id="hulls" checked> group bubbles</label>
   <label class="row"><input type="checkbox" id="labels" checked> labels</label>
   <h2>Selection</h2>
   <div id="selection-info">click a node or edge to select it</div>
   <div id="selection-groups"></div>
+  <div id="selection-charge" style="display:none">
+    <div class="slider-label"><span>this node's repulsion offset</span><span id="node-charge-val"></span></div>
+    <input type="range" id="node-charge" min="-100" max="100" step="5" value="0">
+  </div>
   <div class="btn-row">
     <button id="hide-selected" disabled>hide selected</button>
     <button id="add-to-group" disabled>add to group</button>
@@ -140,6 +146,11 @@
   </div>
   <h2>Data</h2>
   <div id="loadfile">load graph.json (or drop it anywhere)<input type="file" accept=".json"></div>
+  <div class="btn-row" style="margin-top:6px">
+    <input type="text" id="path-input" placeholder="absolute path to graph.json">
+    <button id="path-load-btn">load</button>
+  </div>
+  <div id="path-error" style="color:#E06C75; font-size:11px; margin-top:4px;"></div>
   <div id="stats"></div>
 </div>
 <div id="tooltip"></div>
@@ -214,6 +225,19 @@ let hiddenGroupNodes = new Set();   // group name -> members hidden (like a role
 let selectedGroup = null;
 const groupColor = d3.scaleOrdinal(d3.schemeTableau10.map(c => c));
 
+// Persistent per-node repulsion offset, independent of selection: a node stays
+// nudged this way whether or not it's currently selected. The slider that
+// edits a given node's value only shows up in the Selection panel while that
+// node is selected -- the value itself isn't tied to selection state.
+let nodeChargeOverride = new Map(); // nodeId -> number, default 0
+function chargeStrength(d) {
+  return -(40 + d.r * 9) * chargeScale - (nodeChargeOverride.get(d.id) ?? 0);
+}
+function rebuildChargeForce() {
+  sim?.force("charge", d3.forceManyBody().strength(chargeStrength));
+  sim?.alpha(0.4).restart();
+}
+
 function groupsOfNode(id) {
   const gs = [];
   for (const [name, members] of groupMembership) if (members.has(id)) gs.push(name);
@@ -231,7 +255,7 @@ function restLength(l) {
 
 function edgeKey(l) { return `${l.from}|${l.to}|${l.kind}|${l.signal ?? ""}`; }
 
-let chargeScale = 1, springScale = 1;
+let chargeScale = 1, springScale = 1, interGroupScale = 3;
 
 function build(data) {
   nodes = data.nodes.map(n => ({ ...n, r: 0 }));
@@ -245,6 +269,7 @@ function build(data) {
   for (const l of links) { adjacency.get(l.from).add(l.to); adjacency.get(l.to).add(l.from); }
 
   hiddenNodeIds.clear(); hiddenEdgeKeys.clear(); selected = null;
+  nodeChargeOverride = new Map();
 
   groupMembership = new Map();
   for (const n of nodes) {
@@ -260,11 +285,12 @@ function build(data) {
   const W = innerWidth, H = innerHeight;
   sim = d3.forceSimulation([])
     .force("link", d3.forceLink([]).id(d => d.id))
-    .force("charge", d3.forceManyBody().strength(d => -(40 + d.r * 9) * chargeScale))
+    .force("charge", d3.forceManyBody().strength(chargeStrength))
     .force("collide", d3.forceCollide(d => d.r + 5).iterations(2))
     .force("x", d3.forceX(W / 2).strength(0.03))
     .force("y", d3.forceY(H / 2).strength(0.03))
     .force("cluster", clusterForce(0.18))
+    .force("interGroup", interGroupForce())
     .on("tick", tick);
 
   render();
@@ -303,6 +329,36 @@ function clusterForce(strength) {
       const cy = d3.mean(gs, g => centroidOf.get(g).y);
       n.vx += (cx - n.x) * strength * alpha;
       n.vy += (cy - n.y) * strength * alpha;
+    }
+  }
+  force.initialize = n => nodesRef = n;
+  return force;
+}
+
+// Pushes every node away from the centroid of every group it does NOT belong
+// to. Two groups' members aren't in each other's group, so this separates
+// groups from each other as a side effect of the same rule that pushes
+// non-member/ungrouped nodes clear of bubbles they're not part of. Reads
+// interGroupScale live, so the slider needs no force-rebuild wiring.
+function interGroupForce() {
+  let nodesRef;
+  function force(alpha) {
+    if (!groupBubbles || interGroupScale === 0 || groupMembership.size === 0) return;
+    const centroidOf = new Map();
+    for (const [name, members] of groupMembership) {
+      const memberNodes = nodesRef.filter(n => members.has(n.id));
+      if (memberNodes.length) centroidOf.set(name, { x: d3.mean(memberNodes, d => d.x), y: d3.mean(memberNodes, d => d.y) });
+    }
+    for (const n of nodesRef) {
+      const myGroups = new Set(groupsOfNode(n.id));
+      for (const [name, c] of centroidOf) {
+        if (myGroups.has(name)) continue;
+        const dx = n.x - c.x, dy = n.y - c.y;
+        const distSq = Math.max(dx * dx + dy * dy, 100);
+        const f = (interGroupScale * 4000 * alpha) / distSq;
+        n.vx += dx * f;
+        n.vy += dy * f;
+      }
     }
   }
   force.initialize = n => nodesRef = n;
@@ -376,6 +432,7 @@ function render() {
   updateSelectionPanel();
   updateHiddenPanel();
   updateGroupPanel();
+  saveSession();
 }
 
 function tick() {
@@ -456,12 +513,14 @@ function updateSelectionPanel() {
   const hideBtn = document.getElementById("hide-selected");
   const addBtn = document.getElementById("add-to-group");
   const groupsDiv = d3.select("#selection-groups");
+  const chargeDiv = document.getElementById("selection-charge");
 
   if (!selected) {
     info.textContent = "click a node or edge to select it";
     hideBtn.disabled = true;
     addBtn.disabled = true;
     groupsDiv.selectAll("*").remove();
+    chargeDiv.style.display = "none";
     return;
   }
   hideBtn.disabled = false;
@@ -482,13 +541,28 @@ function updateSelectionPanel() {
     groupsDiv.selectAll("span.group-chip").select(".chip-text").text(g => g);
 
     addBtn.disabled = !selectedGroup;
+
+    chargeDiv.style.display = "";
+    const offset = nodeChargeOverride.get(selected.id) ?? 0;
+    document.getElementById("node-charge").value = offset;
+    document.getElementById("node-charge-val").textContent = offset;
   } else {
     const l = links.find(l => edgeKey(l) === selected.key);
     info.textContent = l ? `selected: ${l.kind} edge` : "selected: edge";
     groupsDiv.selectAll("*").remove();
     addBtn.disabled = true;
+    chargeDiv.style.display = "none";
   }
 }
+document.getElementById("node-charge").addEventListener("input", function () {
+  if (!selected || selected.type !== "node") return;
+  const value = +this.value;
+  document.getElementById("node-charge-val").textContent = value;
+  if (value === 0) nodeChargeOverride.delete(selected.id);
+  else nodeChargeOverride.set(selected.id, value);
+  rebuildChargeForce();
+  saveSession();
+});
 document.getElementById("hide-selected").addEventListener("click", () => {
   if (!selected) return;
   if (selected.type === "node") hiddenNodeIds.add(selected.id);
@@ -596,6 +670,7 @@ function createGroupFromInput() {
   groupMembership.set(name, new Set());
   input.value = "";
   updateGroupPanel();
+  saveSession();
 }
 
 document.getElementById("export-groups").addEventListener("click", () => {
@@ -650,7 +725,7 @@ let groupBubbles = true, showLabels = true;
 const edgeToggles = d3.select("#edge-toggles");
 for (const [kind, s] of Object.entries(EDGE_STYLE)) {
   const row = edgeToggles.append("label").attr("class", "row");
-  row.append("input").attr("type", "checkbox").property("checked", true)
+  row.append("input").attr("type", "checkbox").attr("data-kind", kind).property("checked", true)
     .on("change", function () {
       this.checked ? enabledKinds.add(kind) : enabledKinds.delete(kind);
       render();
@@ -666,7 +741,7 @@ for (const [kind, s] of Object.entries(EDGE_STYLE)) {
 const roleLegend = d3.select("#role-legend");
 for (const [role, meta] of Object.entries(ROLE_META)) {
   const row = roleLegend.append("label").attr("class", "row");
-  row.append("input").attr("type", "checkbox").property("checked", true)
+  row.append("input").attr("type", "checkbox").attr("data-role", role).property("checked", true)
     .on("change", function () {
       this.checked ? hiddenRoles.delete(role) : hiddenRoles.add(role);
       render();
@@ -681,23 +756,117 @@ for (const [role, meta] of Object.entries(ROLE_META)) {
 d3.select("#charge").on("input", function () {
   chargeScale = +this.value;
   document.getElementById("charge-val").textContent = chargeScale.toFixed(2);
-  sim?.force("charge", d3.forceManyBody().strength(d => -(40 + d.r * 9) * chargeScale));
-  sim?.alpha(0.4).restart();
+  rebuildChargeForce();
+  saveSession();
 });
 d3.select("#spring").on("input", function () {
   springScale = +this.value;
   document.getElementById("spring-val").textContent = springScale.toFixed(2);
   sim?.force("link").distance(restLength);
   sim?.alpha(0.4).restart();
+  saveSession();
+});
+d3.select("#intergroup").on("input", function () {
+  interGroupScale = +this.value;
+  document.getElementById("intergroup-val").textContent = interGroupScale.toFixed(1);
+  sim?.alpha(0.4).restart();
+  saveSession();
 });
 d3.select("#hulls").on("change", function () {
   groupBubbles = this.checked;
   sim?.alpha(0.4).restart();
   drawHulls();
+  saveSession();
 });
 d3.select("#labels").on("change", function () {
   showLabels = this.checked; labelSel?.style("display", showLabels ? null : "none");
+  saveSession();
 });
+document.getElementById("charge-val").textContent = chargeScale.toFixed(2);
+document.getElementById("spring-val").textContent = springScale.toFixed(2);
+document.getElementById("intergroup-val").textContent = interGroupScale.toFixed(1);
+
+// -------------------------------------------------------------- persistence
+// Remembers the last-loaded graph's path plus groups/overrides/physics
+// settings across reloads. Deliberately does NOT store the graph itself
+// (could be large, and would go stale vs. the extractor's actual output) --
+// just enough to re-fetch the same file and reapply the same customizations.
+const SESSION_KEY = "codegraph:session:v1";
+let currentGraphPath = null; // null when loaded via fetch("graph.json") or drag-drop
+
+function saveSession() {
+  try {
+    const session = {
+      graphPath: currentGraphPath,
+      groups: Object.fromEntries(Array.from(groupMembership, ([k, v]) => [k, Array.from(v)])),
+      hiddenGroupBubbles: Array.from(hiddenGroupBubbles),
+      hiddenGroupNodes: Array.from(hiddenGroupNodes),
+      nodeChargeOverride: Object.fromEntries(nodeChargeOverride),
+      hiddenRoles: Array.from(hiddenRoles),
+      disabledKinds: Object.keys(EDGE_STYLE).filter(k => !enabledKinds.has(k)),
+      chargeScale, springScale, interGroupScale, groupBubbles, showLabels,
+    };
+    localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  } catch { /* localStorage unavailable or full -- not worth failing over */ }
+}
+function loadSession() {
+  try { return JSON.parse(localStorage.getItem(SESSION_KEY) || "null"); }
+  catch { return null; }
+}
+
+// Reapplies a previously-saved session's groups/overrides/settings on top of
+// a freshly-built graph. Filters out anything referencing nodes/groups that
+// no longer exist (e.g. after a re-extract), so a stale session can't crash
+// or silently corrupt the new graph.
+function applySavedState(session) {
+  if (!session) return;
+  const validIds = new Set(nodes.map(n => n.id));
+
+  if (session.groups) {
+    groupMembership = new Map();
+    for (const [name, ids] of Object.entries(session.groups)) {
+      groupMembership.set(name, new Set(ids.filter(id => validIds.has(id))));
+    }
+  }
+  hiddenGroupBubbles = new Set((session.hiddenGroupBubbles ?? []).filter(g => groupMembership.has(g)));
+  hiddenGroupNodes = new Set((session.hiddenGroupNodes ?? []).filter(g => groupMembership.has(g)));
+  nodeChargeOverride = new Map(
+    Object.entries(session.nodeChargeOverride ?? {}).filter(([id]) => validIds.has(id)));
+
+  hiddenRoles.clear();
+  for (const r of session.hiddenRoles ?? []) hiddenRoles.add(r);
+
+  for (const k of Object.keys(EDGE_STYLE)) enabledKinds.add(k);
+  for (const k of session.disabledKinds ?? []) enabledKinds.delete(k);
+
+  if (typeof session.chargeScale === "number") chargeScale = session.chargeScale;
+  if (typeof session.springScale === "number") springScale = session.springScale;
+  if (typeof session.interGroupScale === "number") interGroupScale = session.interGroupScale;
+  if (typeof session.groupBubbles === "boolean") groupBubbles = session.groupBubbles;
+  if (typeof session.showLabels === "boolean") showLabels = session.showLabels;
+
+  syncControlsFromState();
+  rebuildChargeForce();
+  render();
+}
+
+// Pushes the current in-memory settings back onto the actual controls, since
+// restoring state programmatically doesn't touch their DOM values/checked.
+function syncControlsFromState() {
+  document.getElementById("charge").value = chargeScale;
+  document.getElementById("charge-val").textContent = chargeScale.toFixed(2);
+  document.getElementById("spring").value = springScale;
+  document.getElementById("spring-val").textContent = springScale.toFixed(2);
+  document.getElementById("intergroup").value = interGroupScale;
+  document.getElementById("intergroup-val").textContent = interGroupScale.toFixed(1);
+  document.getElementById("hulls").checked = groupBubbles;
+  document.getElementById("labels").checked = showLabels;
+
+  d3.selectAll("#edge-toggles input[data-kind]")
+    .property("checked", function () { return enabledKinds.has(this.dataset.kind); });
+  d3.selectAll("#role-legend input[data-role]")
+    .property("checked", function () { return !hiddenRoles.has(this.dataset.role); });
+}
 
 // ------------------------------------------------------------------ data load
 document.querySelector("#loadfile input").addEventListener("change", e => loadFile(e.target.files[0]));
@@ -705,13 +874,44 @@ addEventListener("dragover", e => e.preventDefault());
 addEventListener("drop", e => { e.preventDefault(); loadFile(e.dataTransfer.files[0]); });
 function loadFile(file) {
   if (!file) return;
+  currentGraphPath = null; // dropped/picked files have no re-fetchable path
   file.text().then(t => { sim?.stop(); build(JSON.parse(t)); });
 }
 
-fetch("graph.json")
-  .then(r => { if (!r.ok) throw 0; return r.json(); })
-  .then(build)
-  .catch(() => build(SAMPLE));
+// Loads an arbitrary local graph.json by absolute path via the serve.py
+// /api/graph endpoint (plain static servers -- or file://, which this whole
+// feature can't work under anyway -- will just 404/fail here).
+function loadGraphFromPath(path, session) {
+  const errorEl = document.getElementById("path-error");
+  return fetch(`/api/graph?path=${encodeURIComponent(path)}`)
+    .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+    .then(data => {
+      currentGraphPath = path;
+      document.getElementById("path-input").value = path;
+      errorEl.textContent = "";
+      sim?.stop();
+      build(data);
+      applySavedState(session);
+    })
+    .catch(err => { errorEl.textContent = `Failed to load "${path}": ${err.message}`; });
+}
+document.getElementById("path-load-btn").addEventListener("click", () => {
+  const path = document.getElementById("path-input").value.trim();
+  if (path) loadGraphFromPath(path, null);
+});
+document.getElementById("path-input").addEventListener("keydown", e => {
+  if (e.key === "Enter") document.getElementById("path-load-btn").click();
+});
+
+const savedSession = loadSession();
+if (savedSession?.graphPath) {
+  loadGraphFromPath(savedSession.graphPath, savedSession).catch(() => {});
+} else {
+  fetch("graph.json")
+    .then(r => { if (!r.ok) throw 0; return r.json(); })
+    .then(build)
+    .catch(() => build(SAMPLE));
+}
 
 // Small embedded sample so the physics is visible with no data wired up.
 const SAMPLE = {
