@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>code·graph</title>
+<style>
+  :root {
+    --bg: #0E1116; --panel: #161B22cc; --line: #232B36;
+    --ink: #D6DEE8; --muted: #7D8895; --accent: #45C4B8;
+    --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font: 12px/1.5 var(--mono); overflow: hidden; }
+  svg { display: block; width: 100vw; height: 100vh; cursor: grab; }
+  svg:active { cursor: grabbing; }
+
+  #brand { position: fixed; top: 14px; left: 16px; letter-spacing: .35em;
+    font-size: 13px; color: var(--muted); user-select: none; pointer-events: none; }
+  #brand b { color: var(--ink); font-weight: 600; }
+
+  #rail { position: fixed; top: 44px; left: 16px; width: 210px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px;
+    backdrop-filter: blur(6px); max-height: calc(100vh - 60px); overflow-y: auto; }
+  #rail h2 { font-size: 10px; font-weight: 600; letter-spacing: .18em; color: var(--muted);
+    text-transform: uppercase; margin: 14px 0 6px; }
+  #rail h2:first-child { margin-top: 0; }
+  label.row { display: flex; align-items: center; gap: 7px; padding: 2px 0; cursor: pointer; }
+  label.row input { accent-color: var(--accent); }
+  .swatch { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .edgekey { width: 22px; flex: none; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .slider-label { display: flex; justify-content: space-between; color: var(--muted); margin-top: 6px; }
+  #loadfile { color: var(--muted); font-size: 11px; margin-top: 4px; }
+  #loadfile input { width: 100%; }
+  #stats { color: var(--muted); margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+
+  #tooltip { position: fixed; pointer-events: none; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; max-width: 300px;
+    opacity: 0; transition: opacity .12s; backdrop-filter: blur(6px); }
+  #tooltip .t-name { font-weight: 600; }
+  #tooltip .t-file, #tooltip .t-meta { color: var(--muted); font-size: 11px; }
+  #tooltip .t-sig { color: var(--accent); font-size: 11px; }
+
+  .hull { stroke-linejoin: round; stroke-linecap: round; pointer-events: none; }
+  .hull-label { fill: var(--muted); font-size: 11px; letter-spacing: .2em;
+    text-transform: uppercase; pointer-events: none; opacity: .75; }
+  .link { fill: none; }
+  .node { cursor: pointer; }
+  .node text { fill: var(--ink); font-size: 10px; pointer-events: none;
+    paint-order: stroke; stroke: var(--bg); stroke-width: 3px; }
+  .dimmed { opacity: .12; transition: opacity .15s; }
+</style>
+</head>
+<body>
+<div id="brand"><b>code</b>·graph</div>
+<div id="rail">
+  <h2>Edges</h2><div id="edge-toggles"></div>
+  <h2>Roles</h2><div id="role-legend"></div>
+  <h2>Physics</h2>
+  <div class="slider-label"><span>repulsion</span><span id="charge-val"></span></div>
+  <input type="range" id="charge" min="0.3" max="3" step="0.05" value="1">
+  <div class="slider-label"><span>spring length</span><span id="spring-val"></span></div>
+  <input type="range" id="spring" min="0.5" max="2.5" step="0.05" value="1">
+  <label class="row" style="margin-top:8px"><input type="checkbox" id="hulls" checked> group bubbles</label>
+  <label class="row"><input type="checkbox" id="labels" checked> labels</label>
+  <h2>Data</h2>
+  <div id="loadfile">load graph.json (or drop it anywhere)<input type="file" accept=".json"></div>
+  <div id="stats"></div>
+</div>
+<div id="tooltip"></div>
+<svg></svg>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<script>
+"use strict";
+
+const ROLE_COLORS = {
+  manager: "#E8B04B", object: "#5B9FE3", ui: "#C792EA", data: "#6FBF73",
+  utility: "#8A93A6", interface: "#45C4B8", scene: "#E06C75", plain: "#5A6675",
+};
+const EDGE_STYLE = { // stroke, dasharray, base rest-length padding, spring strength
+  inherits:    { color: "#B48EAD", dash: null,      pad: 60,  strength: 0.7, arrow: true  },
+  implements:  { color: "#45C4B8", dash: "6 4",     pad: 70,  strength: 0.5, arrow: true  },
+  calls:       { color: "#5F6B7A", dash: null,      pad: 40,  strength: 0.35, arrow: false },
+  composes:    { color: "#E8B04B", dash: null,      pad: 50,  strength: 0.5, arrow: false },
+  signal:      { color: "#E06C75", dash: "2 5",     pad: 90,  strength: 0.15, arrow: true  },
+  sceneAttach: { color: "#4A5568", dash: "1 4",     pad: 55,  strength: 0.4, arrow: false },
+  nodeRef:     { color: "#8FBCBB", dash: "8 3 2 3", pad: 60,  strength: 0.3, arrow: false },
+};
+
+const svg = d3.select("svg");
+const zoomLayer = svg.append("g");
+const hullLayer = zoomLayer.append("g");
+const linkLayer = zoomLayer.append("g");
+const nodeLayer = zoomLayer.append("g");
+const tooltip = document.getElementById("tooltip");
+
+// arrowheads per edge kind
+const defs = svg.append("defs");
+for (const [kind, s] of Object.entries(EDGE_STYLE)) {
+  if (!s.arrow) continue;
+  defs.append("marker").attr("id", `arrow-${kind}`)
+    .attr("viewBox", "0 -4 8 8").attr("refX", 7).attr("markerWidth", 6)
+    .attr("markerHeight", 6).attr("orient", "auto")
+    .append("path").attr("d", "M0,-3.5L8,0L0,3.5").attr("fill", s.color);
+}
+
+svg.call(d3.zoom().scaleExtent([0.15, 5])
+  .on("zoom", e => zoomLayer.attr("transform", e.transform)));
+
+let sim, nodes = [], links = [], adjacency = new Map();
+const enabledKinds = new Set(Object.keys(EDGE_STYLE));
+const groupColor = d3.scaleOrdinal(d3.schemeTableau10.map(c => c));
+
+function radius(n) {
+  if (n.kind === "scene") return 9;
+  return Math.max(7, Math.min(34, 2.6 * Math.sqrt((n.bytes || 800) / 100)));
+}
+
+function restLength(l) {
+  return (EDGE_STYLE[l.kind]?.pad ?? 50) * springScale + l.source.r + l.target.r;
+}
+
+let chargeScale = 1, springScale = 1;
+
+function build(data) {
+  nodes = data.nodes.map(n => ({ ...n, r: 0 }));
+  nodes.forEach(n => n.r = radius(n));
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  links = data.edges
+    .filter(e => byId.has(e.from) && byId.has(e.to))
+    .map(e => ({ ...e, source: e.from, target: e.to }));
+
+  adjacency = new Map(nodes.map(n => [n.id, new Set([n.id])]));
+  for (const l of links) { adjacency.get(l.from).add(l.to); adjacency.get(l.to).add(l.from); }
+
+  const W = innerWidth, H = innerHeight;
+  sim = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(links).id(d => d.id)
+      .distance(restLength).strength(l => EDGE_STYLE[l.kind]?.strength ?? 0.4))
+    .force("charge", d3.forceManyBody().strength(d => -(40 + d.r * 9) * chargeScale))
+    .force("collide", d3.forceCollide(d => d.r + 5).iterations(2))
+    .force("x", d3.forceX(W / 2).strength(0.03))
+    .force("y", d3.forceY(H / 2).strength(0.03))
+    .force("cluster", clusterForce(0.18))
+    .on("tick", tick);
+
+  render();
+  updateStats(data);
+}
+
+// gentle pull toward each group's centroid so bubbles self-segregate
+function clusterForce(strength) {
+  let nodesRef;
+  function force(alpha) {
+    const centroids = d3.rollup(nodesRef, v => ({
+      x: d3.mean(v, d => d.x), y: d3.mean(v, d => d.y),
+    }), d => d.group);
+    for (const n of nodesRef) {
+      const c = centroids.get(n.group);
+      if (!c) continue;
+      n.vx += (c.x - n.x) * strength * alpha;
+      n.vy += (c.y - n.y) * strength * alpha;
+    }
+  }
+  force.initialize = n => nodesRef = n;
+  return force;
+}
+
+let linkSel, nodeSel, hullSel, labelSel;
+
+function render() {
+  const visible = links.filter(l => enabledKinds.has(l.kind));
+
+  linkSel = linkLayer.selectAll("path").data(visible, l => `${l.from}|${l.to}|${l.kind}|${l.signal ?? ""}`)
+    .join("path")
+    .attr("class", "link")
+    .attr("stroke", l => EDGE_STYLE[l.kind].color)
+    .attr("stroke-dasharray", l => EDGE_STYLE[l.kind].dash)
+    .attr("stroke-width", l => l.kind === "calls" ? Math.min(4, 0.8 + Math.sqrt(l.weight ?? 1) * 0.5) : 1.3)
+    .attr("stroke-opacity", l => l.kind === "calls" ? Math.min(0.85, 0.3 + (l.weight ?? 1) * 0.06) : 0.65)
+    .attr("marker-end", l => EDGE_STYLE[l.kind].arrow ? `url(#arrow-${l.kind})` : null);
+
+  nodeSel = nodeLayer.selectAll("g.node").data(nodes, n => n.id)
+    .join(enter => {
+      const g = enter.append("g").attr("class", "node");
+      g.each(function (n) {
+        const el = d3.select(this);
+        if (n.kind === "scene") {
+          el.append("rect").attr("x", -n.r).attr("y", -n.r)
+            .attr("width", n.r * 2).attr("height", n.r * 2)
+            .attr("transform", "rotate(45)").attr("rx", 2)
+            .attr("fill", ROLE_COLORS.scene).attr("fill-opacity", 0.85);
+        } else if (n.kind === "interface") {
+          el.append("circle").attr("r", n.r).attr("fill", "var(--bg)")
+            .attr("stroke", ROLE_COLORS.interface).attr("stroke-width", 2)
+            .attr("stroke-dasharray", "4 3");
+        } else {
+          el.append("circle").attr("r", n.r)
+            .attr("fill", ROLE_COLORS[n.role] ?? ROLE_COLORS.plain).attr("fill-opacity", 0.92);
+        }
+        el.append("text").attr("dy", -n.r - 4).attr("text-anchor", "middle").text(n.label);
+      });
+      return g;
+    })
+    .call(d3.drag()
+      .on("start", (e, d) => { if (!e.active) sim.alphaTarget(0.25).restart(); d.fx = d.x; d.fy = d.y; })
+      .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on("end", (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = d.fy = null; }))
+    .on("mouseenter", (e, d) => { highlight(d); showTooltip(e, d); })
+    .on("mousemove", e => moveTooltip(e))
+    .on("mouseleave", () => { clearHighlight(); tooltip.style.opacity = 0; });
+
+  labelSel = nodeSel.select("text").style("display", showLabels ? null : "none");
+  sim.alpha(0.6).restart();
+}
+
+function tick() {
+  linkSel.attr("d", l => `M${l.source.x},${l.source.y}L${edgeTip(l).x},${edgeTip(l).y}`);
+  nodeSel.attr("transform", n => `translate(${n.x},${n.y})`);
+  drawHulls();
+}
+
+// shorten line so arrowheads sit on the node rim
+function edgeTip(l) {
+  const dx = l.target.x - l.source.x, dy = l.target.y - l.source.y;
+  const dist = Math.hypot(dx, dy) || 1;
+  const cut = EDGE_STYLE[l.kind].arrow ? l.target.r + 3 : 0;
+  return { x: l.target.x - dx / dist * cut, y: l.target.y - dy / dist * cut };
+}
+
+const hullLine = d3.line().curve(d3.curveCatmullRomClosed);
+function drawHulls() {
+  if (!showHulls) { hullLayer.selectAll("*").remove(); return; }
+  const groups = d3.group(nodes.filter(n => n.group && n.group !== "(none)"), n => n.group);
+  const shapes = [];
+  for (const [name, members] of groups) {
+    if (members.length < 2) continue;
+    const pts = members.flatMap(n => [
+      [n.x - n.r, n.y], [n.x + n.r, n.y], [n.x, n.y - n.r], [n.x, n.y + n.r]]);
+    const hull = d3.polygonHull(pts) ?? pts;
+    shapes.push({ name, hull, top: d3.least(members, n => n.y - n.r) });
+  }
+  hullLayer.selectAll("path").data(shapes, s => s.name).join("path")
+    .attr("class", "hull")
+    .attr("d", s => hullLine(s.hull))
+    .attr("fill", s => groupColor(s.name)).attr("fill-opacity", 0.07)
+    .attr("stroke", s => groupColor(s.name)).attr("stroke-opacity", 0.12)
+    .attr("stroke-width", 46);
+  hullLayer.selectAll("text").data(shapes, s => s.name).join("text")
+    .attr("class", "hull-label")
+    .attr("x", s => d3.polygonCentroid(s.hull)[0])
+    .attr("y", s => Math.min(...s.hull.map(p => p[1])) - 34)
+    .attr("text-anchor", "middle")
+    .text(s => s.name);
+}
+
+function highlight(d) {
+  const near = adjacency.get(d.id);
+  nodeSel.classed("dimmed", n => !near.has(n.id));
+  linkSel.classed("dimmed", l => l.from !== d.id && l.to !== d.id);
+}
+function clearHighlight() {
+  nodeSel.classed("dimmed", false);
+  linkSel.classed("dimmed", false);
+}
+
+function showTooltip(e, d) {
+  const sigs = [];
+  if (d.signalsDeclared?.length) sigs.push(`declares: ${d.signalsDeclared.join(", ")}`);
+  if (d.signalsEmitted?.length) sigs.push(`emits: ${d.signalsEmitted.join(", ")}`);
+  tooltip.innerHTML =
+    `<div class="t-name">${d.label}</div>` +
+    (d.file ? `<div class="t-file">${d.file}</div>` : "") +
+    `<div class="t-meta">${d.kind} · ${d.role} · ${d.group}` +
+    (d.loc ? ` · ${d.loc} loc` : "") + (d.baseType ? ` · : ${d.baseType}` : "") + `</div>` +
+    sigs.map(s => `<div class="t-sig">${s}</div>`).join("") +
+    (d.scenes?.length ? `<div class="t-meta">in: ${d.scenes.join(", ")}</div>` : "");
+  tooltip.style.opacity = 1;
+  moveTooltip(e);
+}
+function moveTooltip(e) {
+  tooltip.style.left = Math.min(e.clientX + 14, innerWidth - 320) + "px";
+  tooltip.style.top = (e.clientY + 14) + "px";
+}
+
+function updateStats(data) {
+  document.getElementById("stats").textContent =
+    `${data.nodes.length} nodes · ${data.edges.length} edges` +
+    (data.meta?.generatedAt ? ` · ${data.meta.generatedAt.slice(0, 10)}` : "");
+}
+
+// ------------------------------------------------------------------ controls
+let showHulls = true, showLabels = true;
+
+const edgeToggles = d3.select("#edge-toggles");
+for (const [kind, s] of Object.entries(EDGE_STYLE)) {
+  const row = edgeToggles.append("label").attr("class", "row");
+  row.append("input").attr("type", "checkbox").property("checked", true)
+    .on("change", function () { this.checked ? enabledKinds.add(kind) : enabledKinds.delete(kind); render(); });
+  row.append("svg").attr("class", "edgekey").attr("height", 6)
+    .append("line").attr("x1", 0).attr("x2", 22).attr("y1", 3).attr("y2", 3)
+    .attr("stroke", s.color).attr("stroke-width", 2).attr("stroke-dasharray", s.dash);
+  row.append("span").text(kind);
+}
+const roleLegend = d3.select("#role-legend");
+for (const [role, color] of Object.entries(ROLE_COLORS)) {
+  const row = roleLegend.append("label").attr("class", "row");
+  row.append("span").attr("class", "swatch").style("background", color);
+  row.append("span").text(role);
+}
+
+d3.select("#charge").on("input", function () {
+  chargeScale = +this.value;
+  document.getElementById("charge-val").textContent = chargeScale.toFixed(2);
+  sim?.force("charge", d3.forceManyBody().strength(d => -(40 + d.r * 9) * chargeScale));
+  sim?.alpha(0.4).restart();
+});
+d3.select("#spring").on("input", function () {
+  springScale = +this.value;
+  document.getElementById("spring-val").textContent = springScale.toFixed(2);
+  sim?.force("link").distance(restLength);
+  sim?.alpha(0.4).restart();
+});
+d3.select("#hulls").on("change", function () { showHulls = this.checked; drawHulls(); });
+d3.select("#labels").on("change", function () {
+  showLabels = this.checked; labelSel?.style("display", showLabels ? null : "none");
+});
+
+// ------------------------------------------------------------------ data load
+document.querySelector("#loadfile input").addEventListener("change", e => loadFile(e.target.files[0]));
+addEventListener("dragover", e => e.preventDefault());
+addEventListener("drop", e => { e.preventDefault(); loadFile(e.dataTransfer.files[0]); });
+function loadFile(file) {
+  if (!file) return;
+  file.text().then(t => { sim?.stop(); build(JSON.parse(t)); });
+}
+
+fetch("graph.json")
+  .then(r => { if (!r.ok) throw 0; return r.json(); })
+  .then(build)
+  .catch(() => build(SAMPLE));
+
+// Small embedded sample so the physics is visible with no data wired up.
+const SAMPLE = {
+  meta: { schemaVersion: 1 },
+  nodes: [
+    { id: "MyGame.GameManager", label: "GameManager", kind: "class", file: "scripts/core/GameManager.cs", bytes: 6200, loc: 210, role: "manager", group: "core", baseType: "Node", signalsDeclared: ["GamePaused"], signalsEmitted: ["GamePaused"] },
+    { id: "MyGame.EventBus", label: "EventBus", kind: "class", file: "scripts/core/EventBus.cs", bytes: 2100, loc: 80, role: "manager", group: "core", signalsDeclared: ["EnemyDied", "ItemPickedUp"], signalsEmitted: [] },
+    { id: "MyGame.SaveService", label: "SaveService", kind: "class", file: "scripts/core/SaveService.cs", bytes: 4800, loc: 150, role: "utility", group: "core", isStatic: true },
+    { id: "MyGame.Player", label: "Player", kind: "class", file: "scripts/actors/Player.cs", bytes: 9400, loc: 320, role: "object", group: "actors", baseType: "CharacterBody2D", signalsDeclared: ["HealthChanged"], signalsEmitted: ["HealthChanged"], scenes: ["scenes/player.tscn"] },
+    { id: "MyGame.Enemy", label: "Enemy", kind: "class", file: "scripts/actors/Enemy.cs", bytes: 5100, loc: 180, role: "object", group: "actors", baseType: "CharacterBody2D", signalsEmitted: ["EnemyDied"] },
+    { id: "MyGame.IDamageable", label: "IDamageable", kind: "interface", file: "scripts/actors/IDamageable.cs", bytes: 300, loc: 12, role: "interface", group: "actors" },
+    { id: "MyGame.Inventory", label: "Inventory", kind: "class", file: "scripts/items/Inventory.cs", bytes: 7200, loc: 250, role: "object", group: "items", signalsEmitted: ["ItemPickedUp"] },
+    { id: "MyGame.ItemData", label: "ItemData", kind: "class", file: "scripts/items/ItemData.cs", bytes: 1400, loc: 55, role: "data", group: "items", baseType: "Resource" },
+    { id: "MyGame.HUD", label: "HUD", kind: "class", file: "scripts/ui/HUD.cs", bytes: 3600, loc: 130, role: "ui", group: "ui", baseType: "Control", scenes: ["scenes/hud.tscn"] },
+    { id: "MyGame.PauseMenu", label: "PauseMenu", kind: "class", file: "scripts/ui/PauseMenu.cs", bytes: 2000, loc: 78, role: "ui", group: "ui", baseType: "Control" },
+    { id: "scene:scenes/player.tscn", label: "player", kind: "scene", file: "scenes/player.tscn", bytes: 1500, role: "scene", group: "scenes" },
+    { id: "scene:scenes/hud.tscn", label: "hud", kind: "scene", file: "scenes/hud.tscn", bytes: 900, role: "scene", group: "scenes" },
+  ],
+  edges: [
+    { from: "MyGame.Player", to: "MyGame.IDamageable", kind: "implements" },
+    { from: "MyGame.Enemy", to: "MyGame.IDamageable", kind: "implements" },
+    { from: "MyGame.Player", to: "MyGame.Inventory", kind: "composes" },
+    { from: "MyGame.Inventory", to: "MyGame.ItemData", kind: "composes" },
+    { from: "MyGame.Player", to: "MyGame.Inventory", kind: "calls", weight: 7 },
+    { from: "MyGame.GameManager", to: "MyGame.SaveService", kind: "calls", weight: 3 },
+    { from: "MyGame.GameManager", to: "MyGame.Player", kind: "nodeRef" },
+    { from: "MyGame.HUD", to: "MyGame.Player", kind: "signal", signal: "HealthChanged" },
+    { from: "MyGame.GameManager", to: "MyGame.EventBus", kind: "signal", signal: "EnemyDied" },
+    { from: "MyGame.Inventory", to: "MyGame.EventBus", kind: "signal", signal: "ItemPickedUp" },
+    { from: "MyGame.PauseMenu", to: "MyGame.GameManager", kind: "signal", signal: "GamePaused" },
+    { from: "scene:scenes/player.tscn", to: "MyGame.Player", kind: "sceneAttach" },
+    { from: "scene:scenes/hud.tscn", to: "MyGame.HUD", kind: "sceneAttach" },
+  ],
+};
+</script>
+</body>
+</html>
