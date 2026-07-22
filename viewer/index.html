@@ -37,11 +37,14 @@
   #stats { color: var(--muted); margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
 
   #selection-info { color: var(--muted); margin-bottom: 6px; min-height: 15px; }
+  #selection-groups { margin-bottom: 6px; }
   button { font: 12px var(--mono); background: #1B2230; color: var(--ink);
     border: 1px solid var(--line); border-radius: 5px; padding: 5px 8px; cursor: pointer; }
   button:hover:not(:disabled) { border-color: var(--accent); }
   button:disabled { color: var(--muted); cursor: default; opacity: .5; }
   .btn-row { display: flex; gap: 6px; }
+  #new-group-name { flex: 1; min-width: 0; background: #1B2230; color: var(--ink);
+    border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px; font: 12px var(--mono); }
 
   .hidden-row { display: flex; align-items: center; gap: 6px; padding: 2px 0;
     color: var(--muted); }
@@ -49,6 +52,18 @@
     width: 14px; text-align: center; }
   .hidden-row .hidden-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #hidden-empty { color: var(--muted); font-style: italic; }
+
+  .group-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+  .group-row input[type=checkbox] { margin: 0; accent-color: var(--accent); }
+  .group-name { cursor: pointer; flex: 1; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+  .group-name.group-name-selected { text-decoration: underline; font-weight: 600; }
+  .group-del { cursor: pointer; color: var(--muted); flex: none; width: 12px; text-align: center; }
+  .group-del:hover { color: var(--accent); }
+  .group-chip { display: inline-flex; align-items: center; gap: 4px; background: #1B2230;
+    border: 1px solid var(--line); border-radius: 10px; padding: 1px 6px; margin: 2px 4px 2px 0;
+    font-size: 11px; }
+  .group-chip .chip-x { cursor: pointer; color: var(--accent); }
 
   #tooltip { position: fixed; pointer-events: none; background: var(--panel);
     border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; max-width: 300px;
@@ -77,6 +92,15 @@
 <div id="rail">
   <h2>Edges</h2><div id="edge-toggles"></div>
   <h2>Roles</h2><div id="role-legend"></div>
+  <h2>Groups</h2>
+  <div id="group-list"></div>
+  <div class="btn-row" style="margin-top:6px">
+    <input type="text" id="new-group-name" placeholder="new group name">
+    <button id="new-group-btn">+</button>
+  </div>
+  <div class="btn-row" style="margin-top:6px">
+    <button id="export-groups">export groups</button>
+  </div>
   <h2>Physics</h2>
   <div class="slider-label"><span>repulsion</span><span id="charge-val"></span></div>
   <input type="range" id="charge" min="0.3" max="10" step="0.05" value="1">
@@ -86,8 +110,10 @@
   <label class="row"><input type="checkbox" id="labels" checked> labels</label>
   <h2>Selection</h2>
   <div id="selection-info">click a node or edge to select it</div>
+  <div id="selection-groups"></div>
   <div class="btn-row">
     <button id="hide-selected" disabled>hide selected</button>
+    <button id="add-to-group" disabled>add to group</button>
   </div>
   <h2>Hidden</h2>
   <div id="hidden-nodes"></div>
@@ -160,7 +186,22 @@ const hiddenRoles = new Set();
 const hiddenNodeIds = new Set();
 const hiddenEdgeKeys = new Set();
 let selected = null; // { type: "node", id } | { type: "edge", key }
+
+// Group membership is many-to-many: a node can belong to any number of groups
+// at once. Seeded from each node's `groups` array on load, then freely
+// editable in the viewer (add/rename/delete/hide are all client-side only
+// until exported).
+let groupMembership = new Map(); // name -> Set<nodeId>
+let hiddenGroupBubbles = new Set(); // group name -> hull hidden (visual only)
+let hiddenGroupNodes = new Set();   // group name -> members hidden (like a role)
+let selectedGroup = null;
 const groupColor = d3.scaleOrdinal(d3.schemeTableau10.map(c => c));
+
+function groupsOfNode(id) {
+  const gs = [];
+  for (const [name, members] of groupMembership) if (members.has(id)) gs.push(name);
+  return gs;
+}
 
 function radius(n) {
   if (n.kind === "scene") return 9;
@@ -188,6 +229,17 @@ function build(data) {
 
   hiddenNodeIds.clear(); hiddenEdgeKeys.clear(); selected = null;
 
+  groupMembership = new Map();
+  for (const n of nodes) {
+    for (const g of (n.groups || [])) {
+      if (!groupMembership.has(g)) groupMembership.set(g, new Set());
+      groupMembership.get(g).add(n.id);
+    }
+  }
+  hiddenGroupBubbles = new Set();
+  hiddenGroupNodes = new Set();
+  selectedGroup = null;
+
   const W = innerWidth, H = innerHeight;
   sim = d3.forceSimulation([])
     .force("link", d3.forceLink([]).id(d => d.id))
@@ -203,9 +255,12 @@ function build(data) {
 }
 
 // Nodes/links currently passing every visibility filter: enabled edge kinds,
-// hidden roles, and individually-hidden nodes/edges.
+// hidden roles, hidden groups, and individually-hidden nodes/edges.
 function currentGraph() {
-  const activeNodes = nodes.filter(n => !hiddenNodeIds.has(n.id) && !hiddenRoles.has(n.role));
+  const activeNodes = nodes.filter(n =>
+    !hiddenNodeIds.has(n.id) &&
+    !hiddenRoles.has(n.role) &&
+    !groupsOfNode(n.id).some(g => hiddenGroupNodes.has(g)));
   const activeIds = new Set(activeNodes.map(n => n.id));
   const activeLinks = links.filter(l =>
     enabledKinds.has(l.kind) && !hiddenEdgeKeys.has(edgeKey(l)) &&
@@ -213,20 +268,24 @@ function currentGraph() {
   return { activeNodes, activeLinks };
 }
 
-// gentle pull toward each group's centroid so bubbles self-segregate;
-// no-ops entirely when "group bubbles" is unchecked.
+// gentle pull toward the (average, if in several) centroid of a node's groups,
+// so bubbles self-segregate; no-ops entirely when "group bubbles" is unchecked.
 function clusterForce(strength) {
   let nodesRef;
   function force(alpha) {
     if (!groupBubbles) return;
-    const centroids = d3.rollup(nodesRef, v => ({
-      x: d3.mean(v, d => d.x), y: d3.mean(v, d => d.y),
-    }), d => d.group);
+    const centroidOf = new Map();
+    for (const [name, members] of groupMembership) {
+      const memberNodes = nodesRef.filter(n => members.has(n.id));
+      if (memberNodes.length) centroidOf.set(name, { x: d3.mean(memberNodes, d => d.x), y: d3.mean(memberNodes, d => d.y) });
+    }
     for (const n of nodesRef) {
-      const c = centroids.get(n.group);
-      if (!c) continue;
-      n.vx += (c.x - n.x) * strength * alpha;
-      n.vy += (c.y - n.y) * strength * alpha;
+      const gs = groupsOfNode(n.id).filter(g => centroidOf.has(g));
+      if (!gs.length) continue;
+      const cx = d3.mean(gs, g => centroidOf.get(g).x);
+      const cy = d3.mean(gs, g => centroidOf.get(g).y);
+      n.vx += (cx - n.x) * strength * alpha;
+      n.vy += (cy - n.y) * strength * alpha;
     }
   }
   force.initialize = n => nodesRef = n;
@@ -299,6 +358,7 @@ function render() {
   applySelectionHighlight();
   updateSelectionPanel();
   updateHiddenPanel();
+  updateGroupPanel();
 }
 
 function tick() {
@@ -319,14 +379,16 @@ function edgeTip(l) {
 const hullLine = d3.line().curve(d3.curveCatmullRomClosed);
 function drawHulls() {
   if (!groupBubbles) { hullLayer.selectAll("*").remove(); return; }
-  const groups = d3.group(sim.nodes().filter(n => n.group && n.group !== "(none)"), n => n.group);
+  const activeNodes = sim.nodes();
   const shapes = [];
-  for (const [name, members] of groups) {
-    if (members.length < 2) continue;
-    const pts = members.flatMap(n => [
+  for (const [name, members] of groupMembership) {
+    if (hiddenGroupBubbles.has(name)) continue;
+    const memberNodes = activeNodes.filter(n => members.has(n.id));
+    if (memberNodes.length < 2) continue;
+    const pts = memberNodes.flatMap(n => [
       [n.x - n.r, n.y], [n.x + n.r, n.y], [n.x, n.y - n.r], [n.x, n.y + n.r]]);
     const hull = d3.polygonHull(pts) ?? pts;
-    shapes.push({ name, hull, top: d3.least(members, n => n.y - n.r) });
+    shapes.push({ name, hull, top: d3.least(memberNodes, n => n.y - n.r) });
   }
   hullLayer.selectAll("path").data(shapes, s => s.name).join("path")
     .attr("class", "hull")
@@ -374,26 +436,53 @@ function selectEdge(d) {
 }
 function updateSelectionPanel() {
   const info = document.getElementById("selection-info");
-  const btn = document.getElementById("hide-selected");
+  const hideBtn = document.getElementById("hide-selected");
+  const addBtn = document.getElementById("add-to-group");
+  const groupsDiv = d3.select("#selection-groups");
+
   if (!selected) {
     info.textContent = "click a node or edge to select it";
-    btn.disabled = true;
+    hideBtn.disabled = true;
+    addBtn.disabled = true;
+    groupsDiv.selectAll("*").remove();
     return;
   }
+  hideBtn.disabled = false;
+
   if (selected.type === "node") {
     const n = nodes.find(n => n.id === selected.id);
     info.textContent = `selected: ${n?.label ?? selected.id} (node)`;
+
+    const chips = groupsDiv.selectAll("span.group-chip").data(groupsOfNode(selected.id), g => g);
+    chips.exit().remove();
+    const entered = chips.enter().append("span").attr("class", "group-chip");
+    entered.append("span").attr("class", "chip-text");
+    entered.append("span").attr("class", "chip-x").text("×")
+      .on("click", (e, g) => {
+        groupMembership.get(g)?.delete(selected.id);
+        render();
+      });
+    groupsDiv.selectAll("span.group-chip").select(".chip-text").text(g => g);
+
+    addBtn.disabled = !selectedGroup;
   } else {
     const l = links.find(l => edgeKey(l) === selected.key);
     info.textContent = l ? `selected: ${l.kind} edge` : "selected: edge";
+    groupsDiv.selectAll("*").remove();
+    addBtn.disabled = true;
   }
-  btn.disabled = false;
 }
 document.getElementById("hide-selected").addEventListener("click", () => {
   if (!selected) return;
   if (selected.type === "node") hiddenNodeIds.add(selected.id);
   else hiddenEdgeKeys.add(selected.key);
   selected = null;
+  render();
+});
+document.getElementById("add-to-group").addEventListener("click", () => {
+  if (!selected || selected.type !== "node" || !selectedGroup) return;
+  if (!groupMembership.has(selectedGroup)) groupMembership.set(selectedGroup, new Set());
+  groupMembership.get(selectedGroup).add(selected.id);
   render();
 });
 document.getElementById("restore-all").addEventListener("click", () => {
@@ -417,14 +506,105 @@ function updateHiddenPanel() {
   document.getElementById("restore-all").disabled = hiddenNodeIds.size === 0 && hiddenEdgeKeys.size === 0;
 }
 
+// --------------------------------------------------------------------- groups
+function updateGroupPanel() {
+  const names = Array.from(groupMembership.keys()).sort();
+  const rows = d3.select("#group-list").selectAll("div.group-row").data(names, name => name);
+  rows.exit().remove();
+  const entered = rows.enter().append("div").attr("class", "group-row");
+  entered.append("input").attr("type", "checkbox").attr("class", "grp-bubble-cb")
+    .on("change", function (e, name) {
+      this.checked ? hiddenGroupBubbles.delete(name) : hiddenGroupBubbles.add(name);
+      drawHulls();
+    });
+  entered.append("input").attr("type", "checkbox").attr("class", "grp-nodes-cb")
+    .on("change", function (e, name) {
+      this.checked ? hiddenGroupNodes.delete(name) : hiddenGroupNodes.add(name);
+      render();
+    });
+  entered.append("span").attr("class", "group-name")
+    .on("click", (e, name) => {
+      selectedGroup = selectedGroup === name ? null : name;
+      updateGroupPanel();
+      updateSelectionPanel();
+    })
+    .on("dblclick", (e, name) => renameGroup(name));
+  entered.append("span").attr("class", "group-del").text("×")
+    .on("click", (e, name) => deleteGroup(name));
+
+  const merged = d3.select("#group-list").selectAll("div.group-row");
+  merged.select(".grp-bubble-cb").property("checked", name => !hiddenGroupBubbles.has(name));
+  merged.select(".grp-nodes-cb").property("checked", name => !hiddenGroupNodes.has(name));
+  merged.select(".group-name")
+    .text(name => `${name} (${groupMembership.get(name).size})`)
+    .style("color", name => groupColor(name))
+    .classed("group-name-selected", name => selectedGroup === name);
+}
+
+function renameGroup(oldName) {
+  const next = prompt(`Rename group "${oldName}" to:`, oldName);
+  if (next === null) return;
+  const trimmed = next.trim();
+  if (!trimmed || trimmed === oldName) return;
+
+  const members = groupMembership.get(oldName) ?? new Set();
+  groupMembership.delete(oldName);
+  if (groupMembership.has(trimmed)) {
+    for (const id of members) groupMembership.get(trimmed).add(id);
+  } else {
+    groupMembership.set(trimmed, members);
+  }
+  if (hiddenGroupBubbles.delete(oldName)) hiddenGroupBubbles.add(trimmed);
+  if (hiddenGroupNodes.delete(oldName)) hiddenGroupNodes.add(trimmed);
+  if (selectedGroup === oldName) selectedGroup = trimmed;
+  render();
+}
+
+function deleteGroup(name) {
+  groupMembership.delete(name);
+  hiddenGroupBubbles.delete(name);
+  hiddenGroupNodes.delete(name);
+  if (selectedGroup === name) selectedGroup = null;
+  render();
+}
+
+document.getElementById("new-group-btn").addEventListener("click", createGroupFromInput);
+document.getElementById("new-group-name").addEventListener("keydown", e => {
+  if (e.key === "Enter") createGroupFromInput();
+});
+function createGroupFromInput() {
+  const input = document.getElementById("new-group-name");
+  const name = input.value.trim();
+  if (!name || groupMembership.has(name)) return;
+  groupMembership.set(name, new Set());
+  input.value = "";
+  updateGroupPanel();
+}
+
+document.getElementById("export-groups").addEventListener("click", () => {
+  const groups = {};
+  for (const n of nodes) {
+    const gs = groupsOfNode(n.id);
+    if (gs.length) groups[n.id] = gs;
+  }
+  const blob = new Blob([JSON.stringify({ groups }, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "codegraph.config.groups.json";
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
 function showTooltip(e, d) {
   const sigs = [];
   if (d.signalsDeclared?.length) sigs.push(`declares: ${d.signalsDeclared.join(", ")}`);
   if (d.signalsEmitted?.length) sigs.push(`emits: ${d.signalsEmitted.join(", ")}`);
+  const groupText = (d.groups?.length ? d.groups : groupsOfNode(d.id)).join(", ") || "(none)";
   tooltip.innerHTML =
     `<div class="t-name">${d.label}</div>` +
     (d.file ? `<div class="t-file">${d.file}</div>` : "") +
-    `<div class="t-meta">${d.kind} · ${d.role} · ${d.group}` +
+    `<div class="t-meta">${d.kind} · ${d.role} · ${groupText}` +
     (d.loc ? ` · ${d.loc} loc` : "") + (d.baseType ? ` · : ${d.baseType}` : "") + `</div>` +
     sigs.map(s => `<div class="t-sig">${s}</div>`).join("") +
     (d.scenes?.length ? `<div class="t-meta">in: ${d.scenes.join(", ")}</div>` : "");
@@ -520,18 +700,18 @@ fetch("graph.json")
 const SAMPLE = {
   meta: { schemaVersion: 1 },
   nodes: [
-    { id: "MyGame.GameManager", label: "GameManager", kind: "class", file: "scripts/core/GameManager.cs", bytes: 6200, loc: 210, role: "manager", group: "core", baseType: "Node", signalsDeclared: ["GamePaused"], signalsEmitted: ["GamePaused"] },
-    { id: "MyGame.EventBus", label: "EventBus", kind: "class", file: "scripts/core/EventBus.cs", bytes: 2100, loc: 80, role: "manager", group: "core", signalsDeclared: ["EnemyDied", "ItemPickedUp"], signalsEmitted: [] },
-    { id: "MyGame.SaveService", label: "SaveService", kind: "class", file: "scripts/core/SaveService.cs", bytes: 4800, loc: 150, role: "utility", group: "core", isStatic: true },
-    { id: "MyGame.Player", label: "Player", kind: "class", file: "scripts/actors/Player.cs", bytes: 9400, loc: 320, role: "object", group: "actors", baseType: "CharacterBody2D", signalsDeclared: ["HealthChanged"], signalsEmitted: ["HealthChanged"], scenes: ["scenes/player.tscn"] },
-    { id: "MyGame.Enemy", label: "Enemy", kind: "class", file: "scripts/actors/Enemy.cs", bytes: 5100, loc: 180, role: "object", group: "actors", baseType: "CharacterBody2D", signalsEmitted: ["EnemyDied"] },
-    { id: "MyGame.IDamageable", label: "IDamageable", kind: "interface", file: "scripts/actors/IDamageable.cs", bytes: 300, loc: 12, role: "interface", group: "actors" },
-    { id: "MyGame.Inventory", label: "Inventory", kind: "class", file: "scripts/items/Inventory.cs", bytes: 7200, loc: 250, role: "object", group: "items", signalsEmitted: ["ItemPickedUp"] },
-    { id: "MyGame.ItemData", label: "ItemData", kind: "class", file: "scripts/items/ItemData.cs", bytes: 1400, loc: 55, role: "data", group: "items", baseType: "Resource" },
-    { id: "MyGame.HUD", label: "HUD", kind: "class", file: "scripts/ui/HUD.cs", bytes: 3600, loc: 130, role: "ui", group: "ui", baseType: "Control", scenes: ["scenes/hud.tscn"] },
-    { id: "MyGame.PauseMenu", label: "PauseMenu", kind: "class", file: "scripts/ui/PauseMenu.cs", bytes: 2000, loc: 78, role: "ui", group: "ui", baseType: "Control" },
-    { id: "scene:scenes/player.tscn", label: "player", kind: "scene", file: "scenes/player.tscn", bytes: 1500, role: "scene", group: "scenes" },
-    { id: "scene:scenes/hud.tscn", label: "hud", kind: "scene", file: "scenes/hud.tscn", bytes: 900, role: "scene", group: "scenes" },
+    { id: "MyGame.GameManager", label: "GameManager", kind: "class", file: "scripts/core/GameManager.cs", bytes: 6200, loc: 210, role: "manager", groups: ["core"], baseType: "Node", signalsDeclared: ["GamePaused"], signalsEmitted: ["GamePaused"] },
+    { id: "MyGame.EventBus", label: "EventBus", kind: "class", file: "scripts/core/EventBus.cs", bytes: 2100, loc: 80, role: "manager", groups: ["core"], signalsDeclared: ["EnemyDied", "ItemPickedUp"], signalsEmitted: [] },
+    { id: "MyGame.SaveService", label: "SaveService", kind: "class", file: "scripts/core/SaveService.cs", bytes: 4800, loc: 150, role: "utility", groups: ["core"], isStatic: true },
+    { id: "MyGame.Player", label: "Player", kind: "class", file: "scripts/actors/Player.cs", bytes: 9400, loc: 320, role: "object", groups: ["actors"], baseType: "CharacterBody2D", signalsDeclared: ["HealthChanged"], signalsEmitted: ["HealthChanged"], scenes: ["scenes/player.tscn"] },
+    { id: "MyGame.Enemy", label: "Enemy", kind: "class", file: "scripts/actors/Enemy.cs", bytes: 5100, loc: 180, role: "object", groups: ["actors"], baseType: "CharacterBody2D", signalsEmitted: ["EnemyDied"] },
+    { id: "MyGame.IDamageable", label: "IDamageable", kind: "interface", file: "scripts/actors/IDamageable.cs", bytes: 300, loc: 12, role: "interface", groups: ["actors"] },
+    { id: "MyGame.Inventory", label: "Inventory", kind: "class", file: "scripts/items/Inventory.cs", bytes: 7200, loc: 250, role: "object", groups: ["items"], signalsEmitted: ["ItemPickedUp"] },
+    { id: "MyGame.ItemData", label: "ItemData", kind: "class", file: "scripts/items/ItemData.cs", bytes: 1400, loc: 55, role: "data", groups: ["items"], baseType: "Resource" },
+    { id: "MyGame.HUD", label: "HUD", kind: "class", file: "scripts/ui/HUD.cs", bytes: 3600, loc: 130, role: "ui", groups: ["ui"], baseType: "Control", scenes: ["scenes/hud.tscn"] },
+    { id: "MyGame.PauseMenu", label: "PauseMenu", kind: "class", file: "scripts/ui/PauseMenu.cs", bytes: 2000, loc: 78, role: "ui", groups: ["ui"], baseType: "Control" },
+    { id: "scene:scenes/player.tscn", label: "player", kind: "scene", file: "scenes/player.tscn", bytes: 1500, role: "scene", groups: ["scenes"] },
+    { id: "scene:scenes/hud.tscn", label: "hud", kind: "scene", file: "scenes/hud.tscn", bytes: 900, role: "scene", groups: ["scenes"] },
   ],
   edges: [
     { from: "MyGame.Player", to: "MyGame.IDamageable", kind: "implements" },

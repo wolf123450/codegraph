@@ -1,8 +1,10 @@
 namespace CodeGraph.Extractor;
 
 /// <summary>
-/// Assigns node.Role and node.Group. Precedence: explicit config override >
+/// Assigns node.Role and node.Groups. Precedence: explicit config override >
 /// path-prefix rule > heuristic. Grouping defaults to a directory path segment.
+/// A node normally gets exactly one heuristic-derived group, but a config
+/// override can put it in several at once.
 /// </summary>
 public sealed class Classifier
 {
@@ -19,15 +21,19 @@ public sealed class Classifier
     {
         foreach (var node in graph.Nodes.Values)
         {
+            node.Groups.Clear();
             if (node.Kind == "scene")
             {
-                node.Group = _config.Groups.GetValueOrDefault(node.Id) ?? DirectoryGroup(node.File);
+                node.Groups.UnionWith(ResolveGroups(node.Id, () => DirectoryGroup(node.File)));
                 continue;
             }
             node.Role = ResolveRole(node);
-            node.Group = _config.Groups.GetValueOrDefault(node.Id) ?? ResolveGroup(node);
+            node.Groups.UnionWith(ResolveGroups(node.Id, () => ResolveGroup(node)));
         }
     }
+
+    private IEnumerable<string> ResolveGroups(string nodeId, Func<string> heuristic) =>
+        _config.Groups.TryGetValue(nodeId, out var over) ? over : new[] { heuristic() };
 
     private string ResolveRole(GraphNode node)
     {

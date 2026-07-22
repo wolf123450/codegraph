@@ -115,7 +115,7 @@ public class ClassifierTests
         NewClassifier().Classify(graph);
 
         Assert.Equal("plain", scene.Role); // untouched default, not reclassified
-        Assert.Equal("Levels", scene.Group);
+        Assert.Equal(new[] { "Levels" }, scene.Groups);
     }
 
     [Fact]
@@ -127,7 +127,7 @@ public class ClassifierTests
         var config = new Config { GroupBy = "namespace" };
         NewClassifier(config).Classify(graph);
 
-        Assert.Equal("Game.Enemies", node.Group);
+        Assert.Equal(new[] { "Game.Enemies" }, node.Groups);
     }
 
     [Fact]
@@ -140,7 +140,7 @@ public class ClassifierTests
         var config = new Config { GroupDepth = 1 };
         NewClassifier(config).Classify(graph);
 
-        Assert.Equal("Enemies", node.Group);
+        Assert.Equal(new[] { "Enemies" }, node.Groups);
     }
 
     [Fact]
@@ -150,10 +150,23 @@ public class ClassifierTests
         var node = graph.GetOrAddNode("Foo", "Foo", "class");
         node.File = "Scripts/Enemies/Goblin.cs";
 
-        var config = new Config { Groups = { ["Foo"] = "custom-group" } };
+        var config = new Config { Groups = { ["Foo"] = new List<string> { "custom-group" } } };
         NewClassifier(config).Classify(graph);
 
-        Assert.Equal("custom-group", node.Group);
+        Assert.Equal(new[] { "custom-group" }, node.Groups);
+    }
+
+    [Fact]
+    public void GroupOverrideCanPutANodeInMultipleGroupsAtOnce()
+    {
+        var graph = new GraphBuilder();
+        var node = graph.GetOrAddNode("Foo", "Foo", "class");
+        node.File = "Scripts/Enemies/Goblin.cs";
+
+        var config = new Config { Groups = { ["Foo"] = new List<string> { "combat", "core" } } };
+        NewClassifier(config).Classify(graph);
+
+        Assert.Equal(new[] { "combat", "core" }, node.Groups); // SortedSet, so alphabetical
     }
 
     [Fact]
@@ -164,6 +177,6 @@ public class ClassifierTests
 
         NewClassifier().Classify(graph);
 
-        Assert.Equal("(none)", node.Group);
+        Assert.Equal(new[] { "(none)" }, node.Groups);
     }
 }

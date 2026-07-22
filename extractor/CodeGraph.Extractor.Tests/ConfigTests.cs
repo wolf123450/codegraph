@@ -31,7 +31,7 @@ public class ConfigTests
               "groupBy": "namespace",
               "groupDepth": 2,
               "roles": { "Foo": "enemy" },
-              "groups": { "Foo": "Combat" },
+              "groups": { "Foo": ["Combat", "Core"] },
               "rolePathPrefixes": { "Scripts/UI/": "ui" }
             }
             """);
@@ -42,7 +42,7 @@ public class ConfigTests
             Assert.Equal("namespace", config.GroupBy);
             Assert.Equal(2, config.GroupDepth);
             Assert.Equal("enemy", config.Roles["Foo"]);
-            Assert.Equal("Combat", config.Groups["Foo"]);
+            Assert.Equal(new[] { "Combat", "Core" }, config.Groups["Foo"]);
             Assert.Equal("ui", config.RolePathPrefixes["Scripts/UI/"]);
         }
         finally

@@ -43,7 +43,7 @@ embedded sample so you can see the physics immediately.
       "bytes": 4821,                    // summed across partial-class files
       "loc": 176,                       // non-empty lines, summed across partials
       "role": "object",                 // manager | object | ui | data | utility | interface | scene | plain
-      "group": "actors",                // grouping key (directory / namespace / override)
+      "groups": ["actors"],             // grouping keys (directory / namespace / override); usually one, can be several
       "isStatic": false,
       "baseType": "CharacterBody2D",    // immediate base, display name
       "godotBase": "Node",              // nearest Godot ancestor category: Node|Control|Resource|RefCounted|GodotObject|null
@@ -89,7 +89,7 @@ Notes on the abstraction (deliberate imprecision):
   "groupBy": "directory",          // "directory" (default) | "namespace"
   "groupDepth": 2,                 // path segment used when groupBy=directory (0-based)
   "roles":  { "MyGame.AudioDirector": "manager" },   // per-type overrides
-  "groups": { "MyGame.SaveService": "infrastructure" },
+  "groups": { "MyGame.SaveService": ["infrastructure", "core"] }, // a node can be in more than one group
   "rolePathPrefixes": { "scripts/ui/": "ui", "scripts/data/": "data" },
   "exclude": ["test/", "addons/gdUnit4/"]
 }

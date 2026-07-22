@@ -23,7 +23,7 @@ public sealed class GraphNode
     public long Bytes { get; set; }
     public int Loc { get; set; }
     public string Role { get; set; } = "plain";
-    public string Group { get; set; } = "";
+    public SortedSet<string> Groups { get; } = new();
     public bool IsStatic { get; set; }
     public string? BaseType { get; set; }
     public string? GodotBase { get; set; }
@@ -118,7 +118,11 @@ public sealed class Config
     public string GroupBy { get; set; } = "directory";   // directory | namespace
     public int GroupDepth { get; set; } = 1;
     public Dictionary<string, string> Roles { get; set; } = new();
-    public Dictionary<string, string> Groups { get; set; } = new();
+
+    /// Per-node group overrides. A node can belong to more than one group at once
+    /// (e.g. a node the viewer's "add to group" feature put into a second, ad-hoc
+    /// group alongside its directory/namespace-derived one).
+    public Dictionary<string, List<string>> Groups { get; set; } = new();
     public Dictionary<string, string> RolePathPrefixes { get; set; } = new();
 
     /// Path prefixes (relative, forward-slash, case-insensitive) to leave out entirely --
