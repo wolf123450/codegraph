@@ -1,6 +1,10 @@
 # codegraph
 
-Code relationship visualization for Godot 4 C# projects. Two halves:
+Code relationship visualization for Godot 4 C# projects.
+
+![Viewer showing an extracted graph](docs/screenshot.png)
+
+Two halves:
 
 1. **extractor/** — Roslyn console tool. Loads your `.csproj`/`.sln`, walks the semantic
    model, parses `.tscn` files and `project.godot`, and emits a single `graph.json`.
