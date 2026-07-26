@@ -51,7 +51,7 @@
     border: 1px solid var(--line); border-radius: 5px; padding: 5px 8px; cursor: pointer; }
   button:hover:not(:disabled) { border-color: var(--accent); }
   button:disabled { color: var(--muted); cursor: default; opacity: .5; }
-  .btn-row { display: flex; gap: 6px; }
+  .btn-row { display: flex; gap: 6px; flex-wrap: wrap; }
   #new-group-name, #path-input { flex: 1; min-width: 0; background: #1B2230; color: var(--ink);
     border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px; font: 12px var(--mono); }
 
@@ -116,6 +116,11 @@
     </div>
     <div class="btn-row" style="margin-top:6px">
       <button id="export-groups">export groups</button>
+      <button id="import-groups">import groups</button>
+      <input type="file" id="import-groups-file" accept=".json" hidden>
+    </div>
+    <div class="btn-row" style="margin-top:6px">
+      <button id="reset-groups">reset groups to file</button>
     </div>
   </details>
   <h2>Physics</h2>
@@ -686,6 +691,54 @@ document.getElementById("export-groups").addEventListener("click", () => {
   a.download = "codegraph.config.groups.json";
   a.click();
   URL.revokeObjectURL(url);
+});
+
+// Imports a previously-exported {groups: {nodeId: [name,...]}} snippet (same
+// shape as codegraph.config.json's "groups" key) and merges it into the
+// current in-memory groups -- doesn't require a re-extract. Ids not present
+// in the currently-loaded graph are dropped silently.
+document.getElementById("import-groups").addEventListener("click", () => {
+  document.getElementById("import-groups-file").click();
+});
+document.getElementById("import-groups-file").addEventListener("change", e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  file.text().then(text => {
+    let parsed;
+    try { parsed = JSON.parse(text); }
+    catch { alert("Not valid JSON."); return; }
+    const groups = parsed.groups ?? {};
+    const validIds = new Set(nodes.map(n => n.id));
+    for (const [nodeId, groupNames] of Object.entries(groups)) {
+      if (!validIds.has(nodeId)) continue;
+      for (const name of groupNames) {
+        if (!groupMembership.has(name)) groupMembership.set(name, new Set());
+        groupMembership.get(name).add(nodeId);
+      }
+    }
+    updateGroupPanel();
+    render();
+  });
+  e.target.value = "";
+});
+
+// Discards any session/live-edited group overrides and rebuilds groups from
+// the currently-loaded graph.json's own "groups" field on each node -- the
+// escape hatch for when session groups have gone stale relative to a
+// re-extracted file.
+document.getElementById("reset-groups").addEventListener("click", () => {
+  groupMembership = new Map();
+  for (const n of nodes) {
+    for (const g of (n.groups || [])) {
+      if (!groupMembership.has(g)) groupMembership.set(g, new Set());
+      groupMembership.get(g).add(n.id);
+    }
+  }
+  hiddenGroupBubbles = new Set();
+  hiddenGroupNodes = new Set();
+  selectedGroup = null;
+  updateGroupPanel();
+  render();
 });
 
 function showTooltip(e, d) {

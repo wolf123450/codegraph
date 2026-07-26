@@ -9,7 +9,16 @@ Code relationship visualization for Godot 4 C# projects. Two halves:
    repel each other and push away non-members, drag anything, per-node repulsion
    override, group bubbles, edge-kind styling, role color coding, node size by file
    size. Multi-membership groups (add/rename/delete/hide, per-node or per-group) are
-   editable live and exportable back into `codegraph.config.json`'s `groups`.
+   editable live and persisted to `localStorage` per session. "export groups" writes
+   a `{"groups": {...}}` snippet in the same shape as `codegraph.config.json`'s
+   `groups` key (paste it in there and re-extract to bake edits into `graph.json`
+   permanently); "import groups" reads that same snippet straight back into the
+   live session without a re-extract, merging it into whatever groups are already
+   loaded. "reset groups to file" discards session/live group edits and rebuilds
+   groups from the currently-loaded `graph.json`'s own `groups` field — use it if a
+   stale browser session is shadowing groups you just baked in via a fresh
+   `--config`+re-extract (session groups always take precedence over the file's on
+   load, by design, so in-progress edits survive a refresh).
 
 ## Quick start
 
@@ -134,3 +143,7 @@ compile into the graph and add noise unrelated to your game's architecture.
   base type, by role, by tag, or interactively in the viewer). Worth revisiting —
   possibly viewer-side manual grouping/regrouping, or additional grouping strategies
   in `Classifier`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
