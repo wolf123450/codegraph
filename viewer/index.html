@@ -63,14 +63,30 @@
   #hidden-empty { color: var(--muted); font-style: italic; }
 
   .group-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
-  .group-row input[type=checkbox] { margin: 0; accent-color: var(--accent); width: 13px; height: 13px; flex: none; }
-  .group-row input[type=checkbox]:disabled { opacity: .35; }
-  /* Angled column headers over the per-group checkboxes (spreadsheet-style):
-     each label is rotated from its column's bottom-left corner, so it takes
-     no extra width; the slanted rule under each label points at its column. */
-  #group-head { display: flex; gap: 6px; height: 48px; margin-top: 2px; }
-  #group-head .gh-col { position: relative; width: 13px; flex: none; }
-  #group-head .gh-col span { position: absolute; left: 5px; bottom: 3px; transform-origin: 0 100%;
+  /* Per-group toggles as a segmented control: "on" segments are filled with
+     a tint of the group's colour (--gc) and show the icon at full strength;
+     "off" segments are empty, dim and struck through. */
+  .seg { display: inline-flex; flex: none; border: 1px solid #2A3340; border-radius: 5px;
+    overflow: hidden; background: #0F141B; }
+  .seg-btn { width: 20px; height: 18px; padding: 0; border: 0; border-radius: 0; margin: 0;
+    display: inline-flex; align-items: center; justify-content: center; position: relative;
+    background: transparent; color: #4A5563; cursor: pointer; }
+  .seg-btn + .seg-btn { border-left: 1px solid #2A3340; }
+  .seg-btn + .seg-btn:hover { border-left-color: #2A3340; } /* beat the global button:hover */
+  .seg-btn svg { width: 13px; height: 13px; }
+  .seg-btn.on { background: color-mix(in srgb, var(--gc) 30%, #1B2230); color: var(--gc); }
+  .seg-btn:not(.on)::after { content: ""; position: absolute; width: 15px; height: 1.5px;
+    background: #6B7686; transform: rotate(-45deg); border-radius: 1px; }
+  .seg-btn:hover:not(:disabled) { color: var(--ink); }
+  .seg-btn:hover:not(:disabled):not(.on) { background: #1B2230; }
+  .seg-btn:disabled { cursor: default; opacity: .4; }
+  .seg-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+  /* Angled column headers over the toggles (spreadsheet-style): each label
+     is rotated from the centre of its segment, so it takes no extra width;
+     the slanted rule under each label points at its column. */
+  #group-head { display: flex; height: 48px; margin-top: 2px; padding-left: 1px; }
+  #group-head .gh-col { position: relative; width: 21px; flex: none; }
+  #group-head .gh-col span { position: absolute; left: 9px; bottom: 3px; transform-origin: 0 100%;
     transform: rotate(-55deg); white-space: nowrap; font-size: 9px; letter-spacing: .14em;
     text-transform: uppercase; color: var(--muted); cursor: help; padding: 0 3px 1px 2px;
     border-bottom: 1px solid #344052; line-height: 1.1; }
@@ -1140,30 +1156,56 @@ const GROUP_COLUMNS = [
   }
 }
 
+// Per-group toggle icons (Tabler Icons, MIT, (c) Pawel Kuna -- tabler.io):
+// chart-bubble, arrows-minimize, circles. Inlined so the viewer needs no
+// icon font.
+const GROUP_TOGGLE_ICONS = {
+  bubble: '<path d="M3 16a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"/><path d="M14 19a2 2 0 1 0 4 0a2 2 0 1 0 -4 0"/><path d="M10 7.5a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0 -9 0"/>',
+  pull: '<path d="M5 9l4 0l0 -4"/><path d="M3 3l6 6"/><path d="M5 15l4 0l0 4"/><path d="M3 21l6 -6"/><path d="M19 9l-4 0l0 -4"/><path d="M15 9l6 -6"/><path d="M19 15l-4 0l0 4"/><path d="M15 15l6 6"/>',
+  nodes: '<path d="M8 7a4 4 0 1 0 8 0a4 4 0 1 0 -8 0"/><path d="M2.5 17a4 4 0 1 0 8 0a4 4 0 1 0 -8 0"/><path d="M13.5 17a4 4 0 1 0 8 0a4 4 0 1 0 -8 0"/>',
+};
+const groupToggleSvg = key =>
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ` +
+  `stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${GROUP_TOGGLE_ICONS[key]}</svg>`;
+
+// Each toggle: whether it's on for a group, whether it's usable, and what
+// clicking it does. Order matches GROUP_COLUMNS (the angled headers).
+const GROUP_TOGGLES = [
+  { key: "bubble",
+    on: g => !hiddenGroupBubbles.has(g) && !unpulledGroups.has(g),
+    disabled: g => unpulledGroups.has(g),
+    title: g => unpulledGroups.has(g) ? "bubble hidden: group pull is off" : "show bubble",
+    toggle: g => {
+      hiddenGroupBubbles.has(g) ? hiddenGroupBubbles.delete(g) : hiddenGroupBubbles.add(g);
+      drawHulls(); updateGroupPanel(); saveSession();
+    } },
+  { key: "pull",
+    on: g => !unpulledGroups.has(g), disabled: () => false, title: () => "group pull (physics)",
+    toggle: g => {
+      unpulledGroups.has(g) ? unpulledGroups.delete(g) : unpulledGroups.add(g);
+      sendPhysicsGraph(); // per-node group lists exclude unpulled groups
+      reheat(0.3); drawHulls(); updateGroupPanel(); saveSession();
+    } },
+  { key: "nodes",
+    on: g => !hiddenGroupNodes.has(g), disabled: () => false, title: () => "show members",
+    toggle: g => {
+      hiddenGroupNodes.has(g) ? hiddenGroupNodes.delete(g) : hiddenGroupNodes.add(g);
+      render();
+    } },
+];
+
 function updateGroupPanel() {
   const names = Array.from(groupMembership.keys()).sort();
   const rows = d3.select("#group-list").selectAll("div.group-row").data(names, name => name);
   rows.exit().remove();
   const entered = rows.enter().append("div").attr("class", "group-row");
-  entered.append("input").attr("type", "checkbox").attr("class", "grp-bubble-cb")
-    .on("change", function (e, name) {
-      this.checked ? hiddenGroupBubbles.delete(name) : hiddenGroupBubbles.add(name);
-      drawHulls();
-    });
-  entered.append("input").attr("type", "checkbox").attr("class", "grp-pull-cb")
-    .on("change", function (e, name) {
-      this.checked ? unpulledGroups.delete(name) : unpulledGroups.add(name);
-      sendPhysicsGraph(); // per-node group lists exclude unpulled groups
-      reheat(0.3);
-      drawHulls();
-      updateGroupPanel();
-      saveSession();
-    });
-  entered.append("input").attr("type", "checkbox").attr("class", "grp-nodes-cb")
-    .on("change", function (e, name) {
-      this.checked ? hiddenGroupNodes.delete(name) : hiddenGroupNodes.add(name);
-      render();
-    });
+  // segmented control: one joined strip of three icon toggles per group
+  const seg = entered.append("span").attr("class", "seg").attr("role", "group");
+  for (const t of GROUP_TOGGLES) {
+    seg.append("button").attr("type", "button").attr("class", `seg-btn seg-${t.key}`)
+      .attr("aria-label", t.key).html(groupToggleSvg(t.key))
+      .on("click", function (e) { const g = d3.select(this.closest(".group-row")).datum(); t.toggle(g); });
+  }
   entered.append("span").attr("class", "group-name")
     .on("click", (e, name) => {
       selectedGroup = selectedGroup === name ? null : name;
@@ -1177,14 +1219,14 @@ function updateGroupPanel() {
 
   const merged = d3.select("#group-list").selectAll("div.group-row");
   merged.order(); // keep sorted DOM order when groups are added
-  merged.select(".grp-bubble-cb")
-    .property("checked", name => !hiddenGroupBubbles.has(name) && !unpulledGroups.has(name))
-    .property("disabled", name => unpulledGroups.has(name))
-    .attr("title", name => unpulledGroups.has(name) ? "bubble hidden: group pull is off" : "show bubble");
-  merged.select(".grp-pull-cb").property("checked", name => !unpulledGroups.has(name))
-    .attr("title", "group pull (physics)");
-  merged.select(".grp-nodes-cb").property("checked", name => !hiddenGroupNodes.has(name))
-    .attr("title", "show members");
+  merged.style("--gc", name => groupColor(name));
+  for (const t of GROUP_TOGGLES) {
+    merged.select(`.seg-${t.key}`)
+      .classed("on", name => t.on(name))
+      .attr("aria-pressed", name => String(t.on(name)))
+      .property("disabled", name => t.disabled(name))
+      .attr("title", name => t.title(name));
+  }
   d3.select("#group-head").style("display", names.length ? null : "none");
   // nested groups ("systems/shipgen") sort right after their parent; show
   // them indented by depth with just their last path segment
