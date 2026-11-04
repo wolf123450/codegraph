@@ -113,11 +113,11 @@
   </details>
   <h2>Physics</h2>
   <div class="slider-label"><span>repulsion</span><span id="charge-val"></span></div>
-  <input type="range" id="charge" min="0.3" max="15" step="0.05" value="1">
+  <input type="range" id="charge" min="0.3" max="50" step="0.05" value="1">
   <div class="slider-label"><span>spring length</span><span id="spring-val"></span></div>
-  <input type="range" id="spring" min="0.5" max="15" step="0.05" value="1">
+  <input type="range" id="spring" min="0.5" max="50" step="0.05" value="1">
   <div class="slider-label"><span>group separation</span><span id="intergroup-val"></span></div>
-  <input type="range" id="intergroup" min="0" max="15" step="0.5" value="3">
+  <input type="range" id="intergroup" min="0" max="50" step="0.5" value="3">
   <label class="row" style="margin-top:8px"><input type="checkbox" id="hulls" checked> group bubbles</label>
   <label class="row"><input type="checkbox" id="labels" checked> labels</label>
   <h2>Selection</h2>
@@ -238,8 +238,8 @@ d3.select(canvas)
       dragNode = null;
     }))
   // min zoom is low enough to fit the whole graph even with the repulsion
-  // and spring sliders maxed out
-  .call(d3.zoom().scaleExtent([0.01, 5])
+  // and spring sliders maxed out (50)
+  .call(d3.zoom().scaleExtent([0.002, 5])
     .on("zoom", e => { transform = e.transform; markInteracting(); requestRedraw(); }));
 
 // While a zoom/pan gesture is in progress, drawing drops the expensive
@@ -252,20 +252,53 @@ function markInteracting() {
 }
 
 function pointerWorld(e) { return transform.invert([e.offsetX, e.offsetY]); }
+// One tooltip element, two modes: a node under the pointer always wins;
+// otherwise the bubbles (groups) under the pointer are listed. Content is
+// only rebuilt when what's hovered changes, so the two never flicker
+// against each other.
+let tooltipMode = null;  // null | "node" | "groups"
+let hoverGroups = [];    // names of bubbles under the pointer (when no node is)
+function groupsAt(x, y) {
+  if (!groupBubbles) return [];
+  return hullShapes
+    .filter(s => x >= s.bx0 && x <= s.bx1 && y >= s.by0 && y <= s.by1 && d3.polygonContains(s.rimPts, [x, y]))
+    .sort((a, b) => a.area - b.area) // innermost (smallest) bubble first
+    .map(s => s.name);
+}
+function setHoverGroups(names) {
+  const changed = names.length !== hoverGroups.length || names.some((g, i) => g !== hoverGroups[i]);
+  hoverGroups = names;
+  if (changed) requestRedraw();
+  return changed;
+}
+function hideTooltip() { tooltip.style.opacity = 0; tooltipMode = null; }
 canvas.addEventListener("mousemove", e => {
+  if (e.buttons) { // panning or dragging: no hover changes, no tooltip
+    if (tooltipMode) hideTooltip();
+    return;
+  }
   const [x, y] = pointerWorld(e);
   const n = nodeAt(x, y);
   canvas.style.cursor = (n || edgeAt(x, y)) ? "pointer" : "";
   const id = n?.id ?? null;
-  if (id !== hoverId) {
-    hoverId = id;
-    if (n) showTooltip(e, n); else tooltip.style.opacity = 0;
-    requestRedraw();
-  } else if (n) moveTooltip(e);
+  const hoverChanged = id !== hoverId;
+  if (hoverChanged) { hoverId = id; requestRedraw(); }
+
+  if (n) {
+    setHoverGroups([]);
+    if (hoverChanged || tooltipMode !== "node") { showTooltip(e, n); tooltipMode = "node"; }
+    else moveTooltip(e);
+    return;
+  }
+  const groupsChanged = setHoverGroups(groupsAt(x, y));
+  if (!hoverGroups.length) { if (tooltipMode) hideTooltip(); return; }
+  if (groupsChanged || tooltipMode !== "groups") { showGroupsTooltip(e, hoverGroups); tooltipMode = "groups"; }
+  else moveTooltip(e);
 });
 canvas.addEventListener("mouseleave", () => {
   if (hoverId !== null) { hoverId = null; requestRedraw(); }
-  tooltip.style.opacity = 0;
+  setHoverGroups([]);
+  hideTooltip();
   canvas.style.cursor = "";
 });
 canvas.addEventListener("click", e => {
@@ -717,7 +750,10 @@ function computeHulls() {
     const hull = d3.polygonHull(inner) ?? inner;
     const rim = d3.polygonHull(outer) ?? outer;
     hullShapes.push({
-      name, color: groupColor(name),
+      name, color: groupColor(name), count: ms.length,
+      rimPts: rim, area: Math.abs(d3.polygonArea(rim)), // for hover hit-testing
+      bx0: d3.min(rim, p => p[0]), bx1: d3.max(rim, p => p[0]),
+      by0: d3.min(rim, p => p[1]), by1: d3.max(rim, p => p[1]),
       // rim = padded hull minus the hull itself (even-odd), i.e. just the band
       fill: new Path2D(hullLine(hull)), rim: new Path2D(hullLine(rim) + hullLine(hull)),
       cx: d3.polygonCentroid(hull)[0], top: d3.min(hull, p => p[1]) - 34,
@@ -801,7 +837,7 @@ function drawHullLayer() {
   if (!groupBubbles || !hullShapes.length) return;
   for (const s of hullShapes) {
     ctx.fillStyle = s.color;
-    ctx.globalAlpha = 0.12; ctx.fill(s.rim, "evenodd");
+    ctx.globalAlpha = hoverGroups.includes(s.name) ? 0.24 : 0.12; ctx.fill(s.rim, "evenodd");
     ctx.globalAlpha = 0.07; ctx.fill(s.fill);
   }
   ctx.font = `11px ${MONO}`;
@@ -1201,6 +1237,17 @@ function showTooltip(e, d) {
     (d.loc ? ` · ${d.loc} loc` : "") + (d.baseType ? ` · : ${d.baseType}` : "") + `</div>` +
     sigs.map(s => `<div class="t-sig">${s}</div>`).join("") +
     (d.scenes?.length ? `<div class="t-meta">in: ${d.scenes.join(", ")}</div>` : "");
+  tooltip.style.opacity = 1;
+  moveTooltip(e);
+}
+const escapeHtml = s => String(s).replace(/[&<>"']/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+function showGroupsTooltip(e, names) {
+  const byName = new Map(hullShapes.map(s => [s.name, s]));
+  tooltip.innerHTML =
+    `<div class="t-meta">${names.length === 1 ? "group" : "groups"}</div>` +
+    names.map(g => `<div class="t-name" style="color:${groupColor(g)}">${escapeHtml(g)}` +
+      ` <span class="t-meta">(${byName.get(g)?.count ?? 0})</span></div>`).join("");
   tooltip.style.opacity = 1;
   moveTooltip(e);
 }
