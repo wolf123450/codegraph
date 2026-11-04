@@ -117,6 +117,16 @@ public sealed class Config
 {
     public string GroupBy { get; set; } = "directory";   // directory | namespace
     public int GroupDepth { get; set; } = 1;
+
+    /// Directory grouping only: how many directory levels below GroupDepth also
+    /// become groups of their own, named by path from the GroupDepth segment
+    /// ("systems/shipgen"). Nodes belong to every level at once, so nested
+    /// groups appear as bubbles inside their parent's. 0 disables nesting.
+    public int GroupNestDepth { get; set; } = 1;
+
+    /// Nested groups with fewer members than this, or with exactly the same
+    /// members as their parent, are dropped as noise.
+    public int MinNestedGroupSize { get; set; } = 2;
     public Dictionary<string, string> Roles { get; set; } = new();
 
     /// Per-node group overrides. A node can belong to more than one group at once

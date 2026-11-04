@@ -111,6 +111,9 @@ Notes on the abstraction (deliberate imprecision):
 {
   "groupBy": "directory",          // "directory" (default) | "namespace"
   "groupDepth": 2,                 // path segment used when groupBy=directory (0-based)
+  "groupNestDepth": 1,             // directory levels below groupDepth that also become
+                                   // nested groups, e.g. "systems/shipgen" (0 = off)
+  "minNestedGroupSize": 2,         // drop smaller nested groups (and ones identical to their parent)
   "roles":  { "MyGame.AudioDirector": "manager" },   // per-type overrides
   "groups": { "MyGame.SaveService": ["infrastructure", "core"] }, // a node can be in more than one group
   "rolePathPrefixes": { "scripts/ui/": "ui", "scripts/data/": "data" },

@@ -2,9 +2,10 @@ namespace CodeGraph.Extractor;
 
 /// <summary>
 /// Assigns node.Role and node.Groups. Precedence: explicit config override >
-/// path-prefix rule > heuristic. Grouping defaults to a directory path segment.
-/// A node normally gets exactly one heuristic-derived group, but a config
-/// override can put it in several at once.
+/// path-prefix rule > heuristic. Grouping defaults to a directory path segment,
+/// plus (GroupNestDepth) nested groups for the directories below it, so a node
+/// in src/systems/shipgen/ is in both "systems" and "systems/shipgen". A config
+/// override replaces the heuristic groups and can list several groups at once.
 /// </summary>
 public sealed class Classifier
 {
@@ -24,16 +25,47 @@ public sealed class Classifier
             node.Groups.Clear();
             if (node.Kind == "scene")
             {
-                node.Groups.UnionWith(ResolveGroups(node.Id, () => DirectoryGroup(node.File)));
+                node.Groups.UnionWith(ResolveGroups(node.Id, () => DirectoryGroups(node.File)));
                 continue;
             }
             node.Role = ResolveRole(node);
             node.Groups.UnionWith(ResolveGroups(node.Id, () => ResolveGroup(node)));
         }
+        PruneNestedGroups(graph);
     }
 
-    private IEnumerable<string> ResolveGroups(string nodeId, Func<string> heuristic) =>
-        _config.Groups.TryGetValue(nodeId, out var over) ? over : new[] { heuristic() };
+    private IEnumerable<string> ResolveGroups(string nodeId, Func<IEnumerable<string>> heuristic)
+    {
+        if (_config.Groups.TryGetValue(nodeId, out var over)) return over;
+        var groups = heuristic().ToList();
+        _nested.UnionWith(groups.Where(g => g.Contains('/')));
+        return groups;
+    }
+
+    // heuristic nested groups seen this run (config-override groups are never pruned)
+    private readonly HashSet<string> _nested = new();
+
+    /// Drops nested groups that are too small, or identical in membership to
+    /// their parent (a directory whose only content is one subdirectory).
+    private void PruneNestedGroups(GraphBuilder graph)
+    {
+        var members = new Dictionary<string, HashSet<string>>();
+        foreach (var node in graph.Nodes.Values)
+            foreach (var g in node.Groups)
+                (members.TryGetValue(g, out var s) ? s : members[g] = new()).Add(node.Id);
+
+        // deepest first, so a dropped child doesn't count toward an identical-parent check
+        var drop = new HashSet<string>();
+        foreach (var g in _nested.Where(members.ContainsKey).OrderByDescending(g => g.Count(c => c == '/')))
+        {
+            var parent = g[..g.LastIndexOf('/')];
+            if (members[g].Count < _config.MinNestedGroupSize ||
+                (members.TryGetValue(parent, out var p) && p.SetEquals(members[g])))
+                drop.Add(g);
+        }
+        if (drop.Count == 0) return;
+        foreach (var node in graph.Nodes.Values) node.Groups.ExceptWith(drop);
+    }
 
     private string ResolveRole(GraphNode node)
     {
@@ -56,22 +88,28 @@ public sealed class Classifier
         };
     }
 
-    private string ResolveGroup(GraphNode node)
+    private IEnumerable<string> ResolveGroup(GraphNode node)
     {
         if (_config.GroupBy == "namespace")
         {
             var lastDot = node.Id.LastIndexOf('.');
-            return lastDot > 0 ? node.Id[..lastDot] : "(global)";
+            return new[] { lastDot > 0 ? node.Id[..lastDot] : "(global)" };
         }
-        return DirectoryGroup(node.File);
+        return DirectoryGroups(node.File);
     }
 
-    private string DirectoryGroup(string? file)
+    /// The GroupDepth directory segment, then up to GroupNestDepth deeper
+    /// directories as path-named nested groups ("systems/shipgen").
+    private IEnumerable<string> DirectoryGroups(string? file)
     {
-        if (file is null) return "(none)";
+        if (file is null) return new[] { "(none)" };
         var segments = file.Split('/');
-        if (segments.Length <= 1) return "(root)";
+        if (segments.Length <= 1) return new[] { "(root)" };
         var depth = Math.Clamp(_config.GroupDepth, 0, segments.Length - 2);
-        return segments[depth];
+        var groups = new List<string> { segments[depth] };
+        var dirCount = segments.Length - 1; // last segment is the file name
+        for (var d = depth + 1; d < dirCount && d - depth <= _config.GroupNestDepth; d++)
+            groups.Add(string.Join('/', segments[depth..(d + 1)]));
+        return groups;
     }
 }

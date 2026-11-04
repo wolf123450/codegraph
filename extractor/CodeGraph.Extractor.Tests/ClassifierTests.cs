@@ -179,4 +179,68 @@ public class ClassifierTests
 
         Assert.Equal(new[] { "(none)" }, node.Groups);
     }
+
+    private static GraphNode AddFile(GraphBuilder graph, string id, string file)
+    {
+        var node = graph.GetOrAddNode(id, id, "class");
+        node.File = file;
+        return node;
+    }
+
+    [Fact]
+    public void DirectoryGroupingAddsNestedGroupForSubdirectory()
+    {
+        var graph = new GraphBuilder();
+        var a = AddFile(graph, "A", "src/systems/shipgen/A.cs");
+        AddFile(graph, "B", "src/systems/shipgen/B.cs");
+        AddFile(graph, "C", "src/systems/docking/C.cs");
+        AddFile(graph, "D", "src/systems/docking/D.cs");
+
+        NewClassifier().Classify(graph);
+
+        Assert.Equal(new[] { "systems", "systems/shipgen" }, a.Groups);
+    }
+
+    [Fact]
+    public void NestedGroupsBelowMinimumSizeAreDropped()
+    {
+        var graph = new GraphBuilder();
+        var a = AddFile(graph, "A", "src/systems/shipgen/A.cs");
+        AddFile(graph, "B", "src/systems/shipgen/B.cs");
+        var lone = AddFile(graph, "C", "src/systems/docking/C.cs");
+
+        NewClassifier().Classify(graph);
+
+        Assert.Equal(new[] { "systems", "systems/shipgen" }, a.Groups);
+        Assert.Equal(new[] { "systems" }, lone.Groups);
+    }
+
+    [Fact]
+    public void NestedGroupIdenticalToParentIsDropped()
+    {
+        var graph = new GraphBuilder();
+        var a = AddFile(graph, "A", "src/systems/shipgen/A.cs");
+        AddFile(graph, "B", "src/systems/shipgen/B.cs");
+
+        NewClassifier().Classify(graph);
+
+        Assert.Equal(new[] { "systems" }, a.Groups);
+    }
+
+    [Fact]
+    public void GroupNestDepthControlsHowManyLevelsNest()
+    {
+        var graph = new GraphBuilder();
+        var a = AddFile(graph, "A", "src/systems/shipgen/hull/A.cs");
+        AddFile(graph, "B", "src/systems/shipgen/hull/B.cs");
+        AddFile(graph, "C", "src/systems/shipgen/C.cs");
+        AddFile(graph, "D", "src/systems/docking/D.cs");
+        AddFile(graph, "E", "src/systems/docking/E.cs");
+
+        NewClassifier(new Config { GroupNestDepth = 2 }).Classify(graph);
+        Assert.Equal(new[] { "systems", "systems/shipgen", "systems/shipgen/hull" }, a.Groups);
+
+        NewClassifier(new Config { GroupNestDepth = 0 }).Classify(graph);
+        Assert.Equal(new[] { "systems" }, a.Groups);
+    }
 }

@@ -213,6 +213,30 @@ function requestRedraw() {
 
 // Drag is registered before zoom: when the pointer is on a node, drag claims
 // the gesture (and stops propagation); otherwise subject is null and zoom pans.
+const zoomBehavior = d3.zoom().scaleExtent([0.002, 5])
+  .on("zoom", e => { transform = e.transform; markInteracting(); requestRedraw(); });
+
+// Animates the view to fit a world-space box, centred in the canvas area to
+// the right of the sidebar, without zooming in past MAX_FIT_K for tiny boxes.
+const MAX_FIT_K = 2.5;
+function zoomToBox(x0, y0, x1, y1) {
+  const rail = document.getElementById("rail").getBoundingClientRect();
+  const left = Math.min(rail.right + 16, viewW / 2), pad = 60;
+  const w = Math.max(1, viewW - left - 2 * pad), h = Math.max(1, viewH - 2 * pad);
+  const k = Math.min(MAX_FIT_K, w / Math.max(1, x1 - x0), h / Math.max(1, y1 - y0));
+  const cx = left + pad + w / 2, cy = pad + h / 2;
+  const t = d3.zoomIdentity.translate(cx, cy).scale(k).translate(-(x0 + x1) / 2, -(y0 + y1) / 2);
+  d3.select(canvas).transition().duration(650).call(zoomBehavior.transform, t);
+}
+// Fits the group's currently visible members (no-op if none are visible).
+function zoomToGroup(name) {
+  const members = groupMembership.get(name);
+  const ms = members ? simNodes.filter(n => members.has(n.id)) : [];
+  if (!ms.length) return;
+  zoomToBox(d3.min(ms, n => n.x - n.r - HULL_PAD), d3.min(ms, n => n.y - n.r - HULL_PAD),
+            d3.max(ms, n => n.x + n.r + HULL_PAD), d3.max(ms, n => n.y + n.r + HULL_PAD));
+}
+
 function dragSubject(e) {
   const n = nodeAt(transform.invertX(e.x), transform.invertY(e.y));
   return n ? { node: n, x: transform.applyX(n.x), y: transform.applyY(n.y) } : null;
@@ -239,8 +263,7 @@ d3.select(canvas)
     }))
   // min zoom is low enough to fit the whole graph even with the repulsion
   // and spring sliders maxed out (50)
-  .call(d3.zoom().scaleExtent([0.002, 5])
-    .on("zoom", e => { transform = e.transform; markInteracting(); requestRedraw(); }));
+  .call(zoomBehavior);
 
 // While a zoom/pan gesture is in progress, drawing drops the expensive
 // details (dashes, arrowheads); they come back shortly after it stops.
@@ -1104,6 +1127,7 @@ function updateGroupPanel() {
   entered.append("span").attr("class", "group-name")
     .on("click", (e, name) => {
       selectedGroup = selectedGroup === name ? null : name;
+      if (selectedGroup) zoomToGroup(selectedGroup);
       updateGroupPanel();
       updateSelectionPanel();
     })
@@ -1114,8 +1138,12 @@ function updateGroupPanel() {
   const merged = d3.select("#group-list").selectAll("div.group-row");
   merged.select(".grp-bubble-cb").property("checked", name => !hiddenGroupBubbles.has(name));
   merged.select(".grp-nodes-cb").property("checked", name => !hiddenGroupNodes.has(name));
+  // nested groups ("systems/shipgen") sort right after their parent; show
+  // them indented by depth with just their last path segment
   merged.select(".group-name")
-    .text(name => `${name} (${groupMembership.get(name).size})`)
+    .text(name => `${name.split("/").pop()} (${groupMembership.get(name).size})`)
+    .attr("title", name => name)
+    .style("padding-left", name => `${(name.split("/").length - 1) * 10}px`)
     .style("color", name => groupColor(name))
     .classed("group-name-selected", name => selectedGroup === name);
 }
