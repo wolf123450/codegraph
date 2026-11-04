@@ -93,6 +93,11 @@
   #group-head .gh-col span:hover { color: var(--ink); border-bottom-color: var(--accent); }
   .group-name { cursor: pointer; flex: 1; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; }
+  /* tree guides for nested groups: one slot per ancestor level */
+  .group-row .indent { display: flex; align-self: stretch; margin: -2px -6px -2px 0; flex: none; }
+  .group-row .guide { width: 10px; flex: none; position: relative; }
+  .group-row .guide::before { content: ""; position: absolute; left: 3px; top: 0; bottom: 0;
+    width: 2px; border-radius: 1px; background: color-mix(in srgb, var(--ac) 30%, #1B2230); }
   .group-name.group-name-selected { text-decoration: underline; font-weight: 600; }
   .group-del { cursor: pointer; color: var(--muted); flex: none; width: 12px; text-align: center; }
   .group-del:hover { color: var(--accent); }
@@ -1206,6 +1211,7 @@ function updateGroupPanel() {
       .attr("aria-label", t.key).html(groupToggleSvg(t.key))
       .on("click", function (e) { const g = d3.select(this.closest(".group-row")).datum(); t.toggle(g); });
   }
+  entered.append("span").attr("class", "indent");
   entered.append("span").attr("class", "group-name")
     .on("click", (e, name) => {
       selectedGroup = selectedGroup === name ? null : name;
@@ -1229,11 +1235,19 @@ function updateGroupPanel() {
   }
   d3.select("#group-head").style("display", names.length ? null : "none");
   // nested groups ("systems/shipgen") sort right after their parent; show
-  // them indented by depth with just their last path segment
+  // them with just their last path segment, indented by one guide line per
+  // ancestor, each tinted with that ancestor's colour (same tint as an "on"
+  // toggle) so the lines join up row to row like a tree
+  merged.select(".indent")
+    .style("display", name => name.includes("/") ? null : "none")
+    .selectAll("span.guide")
+    .data(name => name.split("/").slice(0, -1).map((_, i, segs) => segs.slice(0, i + 1).join("/")))
+    .join("span").attr("class", "guide")
+    .style("--ac", ancestor => groupColor(ancestor))
+    .attr("title", ancestor => ancestor);
   merged.select(".group-name")
     .text(name => `${name.split("/").pop()} (${groupMembership.get(name).size})`)
     .attr("title", name => name)
-    .style("padding-left", name => `${(name.split("/").length - 1) * 10}px`)
     .style("color", name => groupColor(name))
     .classed("group-name-selected", name => selectedGroup === name);
 }
