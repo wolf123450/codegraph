@@ -219,10 +219,27 @@ function dragSubject(e) {
 }
 d3.select(canvas)
   .call(d3.drag().container(canvas).subject(dragSubject)
-    .on("start", e => { if (!e.active) sim.alphaTarget(0.25).restart(); const n = e.subject.node; n.fx = n.x; n.fy = n.y; })
-    .on("drag", e => { const n = e.subject.node; n.fx = transform.invertX(e.x); n.fy = transform.invertY(e.y); })
-    .on("end", e => { if (!e.active) sim.alphaTarget(0); const n = e.subject.node; n.fx = n.fy = null; }))
-  .call(d3.zoom().scaleExtent([0.15, 5])
+    .on("start", e => {
+      const n = e.subject.node;
+      dragNode = n;
+      if (!e.active) physics.send({ type: "alphaTarget", value: 0.25 });
+      physics.send({ type: "pin", id: n.id, x: n.x, y: n.y });
+    })
+    .on("drag", e => {
+      const n = e.subject.node;
+      n.x = transform.invertX(e.x); n.y = transform.invertY(e.y);
+      physics.send({ type: "pin", id: n.id, x: n.x, y: n.y });
+      quadtree = null; updateTips(); requestRedraw();
+    })
+    .on("end", e => {
+      const n = e.subject.node;
+      if (!e.active) physics.send({ type: "alphaTarget", value: 0 });
+      physics.send({ type: "unpin", id: n.id });
+      dragNode = null;
+    }))
+  // min zoom is low enough to fit the whole graph even with the repulsion
+  // and spring sliders maxed out
+  .call(d3.zoom().scaleExtent([0.01, 5])
     .on("zoom", e => { transform = e.transform; markInteracting(); requestRedraw(); }));
 
 // While a zoom/pan gesture is in progress, drawing drops the expensive
@@ -260,7 +277,7 @@ canvas.addEventListener("click", e => {
   if (selected) { selected = null; refreshSelection(); }
 });
 
-let sim, nodes = [], links = [], adjacency = new Map();
+let nodes = [], links = [], adjacency = new Map();
 const enabledKinds = new Set(Object.keys(EDGE_STYLE));
 const hiddenRoles = new Set();
 const hiddenNodeIds = new Set();
@@ -282,12 +299,9 @@ const groupColor = d3.scaleOrdinal(d3.schemeTableau10.map(c => c));
 // edits a given node's value only shows up in the Selection panel while that
 // node is selected -- the value itself isn't tied to selection state.
 let nodeChargeOverride = new Map(); // nodeId -> number, default 0
-function chargeStrength(d) {
-  return -(40 + d.r * 9) * chargeScale - (nodeChargeOverride.get(d.id) ?? 0);
-}
 function rebuildChargeForce() {
-  sim?.force("charge", d3.forceManyBody().strength(chargeStrength));
-  sim?.alpha(0.4).restart();
+  sendPhysicsParams();
+  reheat(0.3);
 }
 
 // id -> [group names], rebuilt from groupMembership at the top of every
@@ -312,10 +326,6 @@ function radius(n) {
   return Math.max(7, Math.min(34, 2.6 * Math.sqrt((n.bytes || 800) / 100)));
 }
 
-function restLength(l) {
-  return (EDGE_STYLE[l.kind]?.pad ?? 50) * springScale + l.source.r + l.target.r;
-}
-
 function edgeKey(l) { return `${l.from}|${l.to}|${l.kind}|${l.signal ?? ""}`; }
 
 let chargeScale = 1, springScale = 1, interGroupScale = 3;
@@ -326,7 +336,7 @@ function build(data) {
   const byId = new Map(nodes.map(n => [n.id, n]));
   links = data.edges
     .filter(e => byId.has(e.from) && byId.has(e.to))
-    .map(e => ({ ...e, source: e.from, target: e.to }));
+    .map(e => ({ ...e, source: byId.get(e.from), target: byId.get(e.to) }));
 
   adjacency = new Map(nodes.map(n => [n.id, new Set([n.id])]));
   for (const l of links) { adjacency.get(l.from).add(l.to); adjacency.get(l.to).add(l.from); }
@@ -345,18 +355,10 @@ function build(data) {
   hiddenGroupNodes = new Set();
   selectedGroup = null;
 
-  const W = innerWidth, H = innerHeight;
-  sim = d3.forceSimulation([])
-    .force("link", d3.forceLink([]).id(d => d.id))
-    .force("charge", d3.forceManyBody().strength(chargeStrength))
-    .force("collide", d3.forceCollide(d => d.r + 5).iterations(2))
-    .force("x", d3.forceX(W / 2).strength(0.03))
-    .force("y", d3.forceY(H / 2).strength(0.03))
-    .force("cluster", clusterForce(0.18))
-    .force("interGroup", interGroupForce())
-    .on("tick", tick);
-
-  render();
+  physics.send({ type: "reset" });
+  pendingPos = null; dragNode = null;
+  sendPhysicsParams();
+  render(1);
   updateStats(data);
 }
 
@@ -374,69 +376,247 @@ function currentGraph() {
   return { activeNodes, activeLinks };
 }
 
-// Per-tick group centroids over the active nodes, shared by the cluster and
-// inter-group forces (both run within the same tick, before positions move).
-let centroidCache = null, centroidStamp = -1, tickCount = 0;
-function groupCentroids(nodesRef) {
-  if (centroidCache && centroidStamp === tickCount) return centroidCache;
-  const acc = new Map();
-  for (const n of nodesRef) {
-    for (const g of groupsOfNode(n.id)) {
-      let c = acc.get(g);
-      if (!c) acc.set(g, c = { x: 0, y: 0, n: 0 });
-      c.x += n.x; c.y += n.y; c.n++;
-    }
-  }
-  for (const c of acc.values()) { c.x /= c.n; c.y /= c.n; }
-  centroidCache = acc; centroidStamp = tickCount;
-  return acc;
-}
+// ------------------------------------------------------------------ physics
+// The force simulation runs in a Web Worker so layout work never blocks
+// drawing or input; the main thread only receives node positions. This
+// function is the whole engine. Its source is stringified into the worker
+// (see startPhysics), so it must be self-contained: no references to
+// anything outside its own parameters. If a worker can't be started it runs
+// on the main thread instead, driven by requestAnimationFrame.
+//
+// Messages in:  reset | params {...} | graph {gen, nodes, links}
+//               alpha {value} | alphaTarget {value} | pin {id,x,y} | unpin {id}
+// Messages out: tick {gen, pos: Float32Array [x0,y0,x1,y1,...] in node order}
+function createPhysicsEngine(d3, post, schedule) {
+  const MIN_TICK_MS = 16; // don't outrun the display on small graphs
+  let state = new Map();  // id -> sim node; keeps x/y/vx/vy across graph updates
+  let nodes = [], gen = 0, running = false, lastTick = 0;
+  let params = { chargeScale: 1, springScale: 1, interGroupScale: 3, groupBubbles: true, cx: 0, cy: 0 };
+  let overrides = new Map();
 
-// gentle pull toward the (average, if in several) centroid of a node's groups,
-// so bubbles self-segregate; no-ops entirely when "group bubbles" is unchecked.
-function clusterForce(strength) {
-  let nodesRef;
-  function force(alpha) {
-    if (!groupBubbles) return;
-    const cents = groupCentroids(nodesRef);
-    for (const n of nodesRef) {
-      const gs = groupsOfNode(n.id);
-      if (!gs.length) continue;
-      let cx = 0, cy = 0;
-      for (const g of gs) { const c = cents.get(g); cx += c.x; cy += c.y; }
-      cx /= gs.length; cy /= gs.length;
-      n.vx += (cx - n.x) * strength * alpha;
-      n.vy += (cy - n.y) * strength * alpha;
-    }
-  }
-  force.initialize = n => nodesRef = n;
-  return force;
-}
+  // theta 1.2 (d3 default 0.9) and a single collision pass roughly halve
+  // the cost of the two dominant forces; alphaMin 0.005 (default 0.001)
+  // stops the long, visually static tail of each settle.
+  const sim = d3.forceSimulation([]).stop()
+    .alphaMin(0.005)
+    .force("collide", d3.forceCollide(d => d.r + 5).iterations(1))
+    .force("cluster", clusterForce(0.18))
+    .force("interGroup", interGroupForce());
 
-// Pushes every node away from the centroid of every group it does NOT belong
-// to. Two groups' members aren't in each other's group, so this separates
-// groups from each other as a side effect of the same rule that pushes
-// non-member/ungrouped nodes clear of bubbles they're not part of. Reads
-// interGroupScale live, so the slider needs no force-rebuild wiring.
-function interGroupForce() {
-  let nodesRef;
-  function force(alpha) {
-    if (!groupBubbles || interGroupScale === 0 || groupMembership.size === 0) return;
-    const cents = groupCentroids(nodesRef);
-    const k = interGroupScale * 4000 * alpha;
-    for (const n of nodesRef) {
-      const mine = groupsOfNode(n.id);
-      for (const [name, c] of cents) {
-        if (mine.includes(name)) continue;
-        const dx = n.x - c.x, dy = n.y - c.y;
-        const f = k / Math.max(dx * dx + dy * dy, 100);
-        n.vx += dx * f;
-        n.vy += dy * f;
+  function chargeStrength(d) {
+    return -(40 + d.r * 9) * params.chargeScale - (overrides.get(d.id) ?? 0);
+  }
+  function restLength(l) { return l.pad * params.springScale + l.source.r + l.target.r; }
+
+  // Per-tick group centroids, computed once and shared by both group forces
+  // (they run within the same tick, before positions move).
+  let cents = null, centsTick = -1, tickNo = 0;
+  function groupCentroids() {
+    if (cents && centsTick === tickNo) return cents;
+    const acc = new Map();
+    for (const n of nodes) {
+      for (const g of n.groups) {
+        let c = acc.get(g);
+        if (!c) acc.set(g, c = { x: 0, y: 0, n: 0 });
+        c.x += n.x; c.y += n.y; c.n++;
+      }
+    }
+    for (const c of acc.values()) { c.x /= c.n; c.y /= c.n; }
+    cents = acc; centsTick = tickNo;
+    return acc;
+  }
+  // gentle pull toward the (average, if in several) centroid of a node's
+  // groups, so bubbles self-segregate; no-ops when bubbles are off.
+  function clusterForce(strength) {
+    function force(alpha) {
+      if (!params.groupBubbles) return;
+      const cs = groupCentroids();
+      for (const n of nodes) {
+        const gs = n.groups;
+        if (!gs.length) continue;
+        let cx = 0, cy = 0;
+        for (const g of gs) { const c = cs.get(g); cx += c.x; cy += c.y; }
+        n.vx += (cx / gs.length - n.x) * strength * alpha;
+        n.vy += (cy / gs.length - n.y) * strength * alpha;
+      }
+    }
+    force.initialize = () => {};
+    return force;
+  }
+  // Pushes every node away from the centroid of every group it does NOT
+  // belong to, which also separates groups from each other.
+  function interGroupForce() {
+    function force(alpha) {
+      if (!params.groupBubbles || params.interGroupScale === 0) return;
+      const cs = groupCentroids();
+      if (!cs.size) return;
+      const k = params.interGroupScale * 4000 * alpha;
+      for (const n of nodes) {
+        for (const [name, c] of cs) {
+          if (n.groups.includes(name)) continue;
+          const dx = n.x - c.x, dy = n.y - c.y;
+          const f = k / Math.max(dx * dx + dy * dy, 100);
+          n.vx += dx * f;
+          n.vy += dy * f;
+        }
+      }
+    }
+    force.initialize = () => {};
+    return force;
+  }
+
+  function loop() {
+    lastTick = Date.now();
+    sim.tick();
+    tickNo++;
+    const pos = new Float32Array(nodes.length * 2);
+    for (let i = 0; i < nodes.length; i++) { pos[2 * i] = nodes[i].x; pos[2 * i + 1] = nodes[i].y; }
+    post({ type: "tick", gen, pos }, [pos.buffer]);
+    if (sim.alpha() < sim.alphaMin() && sim.alphaTarget() < sim.alphaMin()) { running = false; return; }
+    schedule(loop, Math.max(0, MIN_TICK_MS - (Date.now() - lastTick)));
+  }
+  function kick() {
+    if (running || !nodes.length) return;
+    running = true;
+    schedule(loop, 0);
+  }
+
+  function handle(m) {
+    switch (m.type) {
+      case "reset":
+        state = new Map(); nodes = []; sim.nodes([]).alpha(0);
+        break;
+      case "params":
+        params = m.params;
+        overrides = new Map(m.params.overrides);
+        sim.force("charge", d3.forceManyBody().strength(chargeStrength).theta(1.2));
+        sim.force("x", d3.forceX(params.cx).strength(0.03));
+        sim.force("y", d3.forceY(params.cy).strength(0.03));
+        sim.force("link")?.distance(restLength);
+        break;
+      case "graph": {
+        gen = m.gen;
+        nodes = m.nodes.map(d => {
+          let n = state.get(d.id);
+          if (!n) state.set(d.id, n = { id: d.id, x: d.x, y: d.y });
+          n.r = d.r; n.groups = d.groups;
+          return n;
+        });
+        sim.nodes(nodes);
+        sim.force("link", d3.forceLink(m.links).id(d => d.id)
+          .distance(restLength).strength(l => l.strength));
+        cents = null;
+        break;
+      }
+      case "alpha": // reheat: never lowers a simulation that's already hotter
+        sim.alpha(Math.max(sim.alpha(), m.value));
+        kick();
+        break;
+      case "alphaTarget":
+        sim.alphaTarget(m.value);
+        kick();
+        break;
+      case "pin": {
+        const n = state.get(m.id);
+        if (n) { n.fx = m.x; n.fy = m.y; }
+        kick();
+        break;
+      }
+      case "unpin": {
+        const n = state.get(m.id);
+        if (n) n.fx = n.fy = null;
+        break;
       }
     }
   }
-  force.initialize = n => nodesRef = n;
-  return force;
+  return { handle };
+}
+
+const D3_URL = document.querySelector('script[src*="d3"]').src;
+let physics = null, physicsGen = 0, pendingPos = null, simNodes = [], tickCount = 0, dragNode = null;
+
+function onPhysicsMessage(m) {
+  if (m.type === "tick" && m.gen === physicsGen) { pendingPos = m.pos; requestRedraw(); }
+}
+function mainThreadPhysics() {
+  const engine = createPhysicsEngine(d3, onPhysicsMessage, f => requestAnimationFrame(() => f()));
+  return { mode: "main", send: m => engine.handle(m) };
+}
+// Starts the worker (or the main-thread fallback: ?mainthread in the URL,
+// no Worker support, or the worker failing to load d3 -- e.g. offline).
+function startPhysics() {
+  if (new URLSearchParams(location.search).has("mainthread") || typeof Worker === "undefined") {
+    physics = mainThreadPhysics();
+    return;
+  }
+  const src = `importScripts(${JSON.stringify(D3_URL)});\n${createPhysicsEngine.toString()}\n` +
+    `const engine = createPhysicsEngine(d3, (m, t) => postMessage(m, t || []), (f, ms) => setTimeout(f, ms));\n` +
+    `onmessage = e => engine.handle(e.data);\npostMessage({ type: "ready" });\n`;
+  let worker;
+  try { worker = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" }))); }
+  catch { physics = mainThreadPhysics(); return; }
+  const queue = [];
+  let ready = false;
+  physics = { mode: "worker", send: m => ready ? worker.postMessage(m) : queue.push(m) };
+  worker.onmessage = e => {
+    if (e.data.type !== "ready") { onPhysicsMessage(e.data); return; }
+    ready = true;
+    for (const m of queue.splice(0)) worker.postMessage(m);
+  };
+  worker.onerror = e => {
+    e.preventDefault();
+    console.warn("physics worker failed, running physics on the main thread:", e.message);
+    worker.terminate();
+    const fallback = mainThreadPhysics();
+    physics.mode = fallback.mode;
+    physics.send = fallback.send;
+    queue.length = 0;
+    resyncPhysics();
+  };
+}
+function sendPhysicsParams() {
+  physics.send({ type: "params", params: {
+    chargeScale, springScale, interGroupScale, groupBubbles,
+    overrides: Array.from(nodeChargeOverride), cx: innerWidth / 2, cy: innerHeight / 2,
+  } });
+}
+function sendPhysicsGraph() {
+  physicsGen++;
+  physics.send({ type: "graph", gen: physicsGen,
+    nodes: simNodes.map(n => ({ id: n.id, r: n.r, groups: groupsOfNode(n.id), x: n.x, y: n.y })),
+    links: activeLinksCache.map(l => ({ source: l.from, target: l.to,
+      pad: EDGE_STYLE[l.kind]?.pad ?? 50, strength: EDGE_STYLE[l.kind]?.strength ?? 0.4 })) });
+}
+function reheat(alpha) { physics.send({ type: "alpha", value: alpha }); }
+// Replays the full current state, e.g. into the fallback engine.
+function resyncPhysics() {
+  physics.send({ type: "reset" });
+  sendPhysicsParams();
+  if (simNodes.length) { sendPhysicsGraph(); reheat(0.3); }
+}
+// Copies the latest worker positions onto the drawn nodes (once per frame).
+function applyPositions() {
+  const pos = pendingPos;
+  pendingPos = null;
+  if (pos.length !== simNodes.length * 2) return;
+  for (let i = 0; i < simNodes.length; i++) {
+    const n = simNodes[i];
+    if (n === dragNode) continue; // follows the pointer locally
+    n.x = pos[2 * i]; n.y = pos[2 * i + 1];
+  }
+  tickCount++;
+  quadtree = null;
+  updateTips();
+}
+// Phyllotaxis seed positions for nodes the simulation hasn't placed yet
+// (same arrangement d3 uses), so drawing/hit-testing never sees undefined.
+function seedPositions(ns) {
+  const cx = innerWidth / 2, cy = innerHeight / 2, a = Math.PI * (3 - Math.sqrt(5));
+  ns.forEach((n, i) => {
+    if (Number.isFinite(n.x) && Number.isFinite(n.y)) return;
+    const r = 10 * Math.sqrt(0.5 + i), t = i * a;
+    n.x = cx + r * Math.cos(t); n.y = cy + r * Math.sin(t);
+  });
 }
 
 let activeLinksCache = [], linkBuckets = [], selectedLink = null;
@@ -446,22 +626,23 @@ let hullShapes = [], quadtree = null;
 // node/link sets, feeds them to the simulation (so hidden/filtered items drop
 // out of physics too, not just the drawing), and redraws. Pure selection
 // changes go through refreshSelection() instead, so they don't reheat physics.
-function render() {
+function render(alpha = 0.3) {
   rebuildGroupIndex();
   const { activeNodes, activeLinks } = currentGraph();
 
-  sim.nodes(activeNodes);
-  sim.force("link", d3.forceLink(activeLinks).id(d => d.id)
-    .distance(restLength).strength(l => EDGE_STYLE[l.kind]?.strength ?? 0.4));
-
+  seedPositions(activeNodes);
   activeNodes.forEach((n, i) => n._i = i);
+  simNodes = activeNodes;
   activeLinksCache = activeLinks;
+  pendingPos = null; // positions in flight are for the old node order
+  sendPhysicsGraph();
+  reheat(alpha);
+
   buildLinkBuckets(activeLinks);
-  centroidCache = null; quadtree = null;
+  quadtree = null;
   updateTips();
   computeHulls();
 
-  sim.alpha(0.6).restart();
   refreshSelection();
   updateHiddenPanel();
   updateGroupPanel();
@@ -491,13 +672,6 @@ function buildLinkBuckets(activeLinks) {
   linkBuckets = Array.from(byKey.values());
 }
 
-function tick() {
-  tickCount++;
-  quadtree = null;
-  updateTips();
-  requestRedraw(); // hulls are recomputed lazily, at most once per drawn frame
-}
-
 // shorten each line so arrowheads sit on the node rim (stored as l.tx/l.ty)
 function updateTips() {
   for (const l of activeLinksCache) {
@@ -521,9 +695,9 @@ let hullTick = -1;
 function computeHulls() {
   hullShapes = [];
   hullTick = tickCount;
-  if (!groupBubbles || !sim) return;
+  if (!groupBubbles) return;
   const byGroup = new Map();
-  for (const n of sim.nodes()) {
+  for (const n of simNodes) {
     for (const g of groupsOfNode(n.id)) {
       if (hiddenGroupBubbles.has(g)) continue;
       let ms = byGroup.get(g);
@@ -560,8 +734,8 @@ function hitsNode(n, x, y) {
 }
 // Topmost (last-drawn) node under a world-space point, or null.
 function nodeAt(x, y) {
-  if (!sim) return null;
-  if (!quadtree) quadtree = d3.quadtree(sim.nodes(), d => d.x, d => d.y);
+  if (!simNodes.length) return null;
+  if (!quadtree) quadtree = d3.quadtree(simNodes, d => d.x, d => d.y);
   const R = 34 * Math.SQRT2;
   let best = null;
   quadtree.visit((q, x0, y0, x1, y1) => {
@@ -603,7 +777,8 @@ const DETAIL_MIN_K = 0.5;
 function draw() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  if (!sim) return;
+  if (pendingPos) applyPositions();
+  if (!simNodes.length) return;
   if (hullTick !== tickCount) computeHulls();
   const k = transform.k;
   ctx.setTransform(dpr * k, 0, 0, dpr * k, dpr * transform.x, dpr * transform.y);
@@ -715,7 +890,7 @@ function drawNodeLayer(view, near) {
     const fills = new Map(); // color -> Path2D of plain circles
     const scenes = new Path2D(), ifaces = new Path2D();
     let anyScene = false, anyIface = false;
-    for (const n of sim.nodes()) {
+    for (const n of simNodes) {
       if ((near !== null && !near.has(n.id)) !== dimPass) continue;
       if (n.x + m < view.x0 || n.x - m > view.x1 || n.y + m < view.y0 || n.y - m > view.y1) continue;
       if (n.kind === "scene") { nodeShape(scenes, n); anyScene = true; }
@@ -739,7 +914,7 @@ function drawNodeLayer(view, near) {
     }
   }
   if (selected?.type === "node") {
-    const n = sim.nodes().find(n => n.id === selected.id);
+    const n = simNodes.find(n => n.id === selected.id);
     if (n) {
       const p = new Path2D(); nodeShape(p, n);
       ctx.save();
@@ -764,7 +939,7 @@ function drawLabelLayer(k, view, near, focusId) {
   ctx.lineWidth = 3; ctx.lineJoin = "round";
   ctx.strokeStyle = BG; ctx.fillStyle = INK;
   const all = k >= LABEL_MIN_K;
-  for (const n of sim.nodes()) {
+  for (const n of simNodes) {
     const inFocus = near !== null && near.has(n.id);
     if (!all && !inFocus && n.r * k < 12) continue;
     const y = n.y - n.r - 4;
@@ -1088,19 +1263,21 @@ d3.select("#charge").on("input", function () {
 d3.select("#spring").on("input", function () {
   springScale = +this.value;
   document.getElementById("spring-val").textContent = springScale.toFixed(2);
-  sim?.force("link").distance(restLength);
-  sim?.alpha(0.4).restart();
+  sendPhysicsParams();
+  reheat(0.3);
   saveSession();
 });
 d3.select("#intergroup").on("input", function () {
   interGroupScale = +this.value;
   document.getElementById("intergroup-val").textContent = interGroupScale.toFixed(1);
-  sim?.alpha(0.4).restart();
+  sendPhysicsParams();
+  reheat(0.3);
   saveSession();
 });
 d3.select("#hulls").on("change", function () {
   groupBubbles = this.checked;
-  sim?.alpha(0.4).restart();
+  sendPhysicsParams();
+  reheat(0.3);
   drawHulls();
   saveSession();
 });
@@ -1201,7 +1378,7 @@ addEventListener("drop", e => { e.preventDefault(); loadFile(e.dataTransfer.file
 function loadFile(file) {
   if (!file) return;
   currentGraphPath = null; // dropped/picked files have no re-fetchable path
-  file.text().then(t => { sim?.stop(); build(JSON.parse(t)); });
+  file.text().then(t => build(JSON.parse(t)));
 }
 
 // Loads an arbitrary local graph.json by absolute path via the serve.py
@@ -1215,7 +1392,6 @@ function loadGraphFromPath(path, session) {
       currentGraphPath = path;
       document.getElementById("path-input").value = path;
       errorEl.textContent = "";
-      sim?.stop();
       build(data);
       applySavedState(session);
     })
@@ -1230,6 +1406,7 @@ document.getElementById("path-input").addEventListener("keydown", e => {
 });
 
 resizeCanvas();
+startPhysics();
 const savedSession = loadSession();
 if (savedSession?.graphPath) {
   loadGraphFromPath(savedSession.graphPath, savedSession).catch(() => {});
