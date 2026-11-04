@@ -23,6 +23,23 @@
   #rail { position: fixed; top: 44px; left: 16px; width: 210px; background: var(--panel);
     border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px;
     backdrop-filter: blur(6px); max-height: calc(100vh - 60px); overflow-y: auto; }
+  /* subtle in-theme scrollbar: thin rounded thumb on an invisible track */
+  #rail::-webkit-scrollbar { width: 8px; }
+  #rail::-webkit-scrollbar-track { background: transparent; }
+  #rail::-webkit-scrollbar-thumb { background: #2E3744; border-radius: 4px;
+    border: 2px solid transparent; background-clip: padding-box; }
+  #rail::-webkit-scrollbar-thumb:hover { background-color: #3E4958; }
+  #rail::-webkit-scrollbar-thumb:active { background-color: #4A5667; }
+  #rail::-webkit-scrollbar-corner { background: transparent; }
+  @supports (-moz-appearance: none) {
+    #rail { scrollbar-width: thin; scrollbar-color: #2E3744 transparent; }
+  }
+  /* drag handle on the sidebar's right edge (double-click resets the width) */
+  #rail-resize { position: fixed; width: 9px; cursor: ew-resize; z-index: 5; touch-action: none; }
+  #rail-resize::after { content: ""; position: absolute; left: 4px; top: 10px; bottom: 10px;
+    width: 1px; background: transparent; transition: background .12s; }
+  #rail-resize:hover::after, #rail-resize.dragging::after { background: var(--accent); }
+  body.resizing-rail, body.resizing-rail * { cursor: ew-resize !important; user-select: none; }
   #rail h2 { font-size: 10px; font-weight: 600; letter-spacing: .18em; color: var(--muted);
     text-transform: uppercase; margin: 14px 0 6px; }
   #rail h2:first-child { margin-top: 0; }
@@ -118,6 +135,7 @@
 </head>
 <body>
 <div id="brand"><b>code</b>·graph</div>
+<div id="rail-resize" title="drag to resize the sidebar · double-click to reset"></div>
 <div id="rail">
   <details class="section" open>
     <summary>Edges</summary>
@@ -1591,6 +1609,51 @@ document.getElementById("path-input").addEventListener("keydown", e => {
 
 resizeCanvas();
 startPhysics();
+// ---------------------------------------------------------- sidebar width
+// Kept under its own key (not the session) so resizing before a graph has
+// loaded can't overwrite the saved groups.
+const RAIL_WIDTH_KEY = "codegraph:railWidth", RAIL_DEFAULT_W = 210, RAIL_MIN_W = 180;
+const railEl = document.getElementById("rail"), railHandle = document.getElementById("rail-resize");
+function setRailWidth(w) {
+  const max = Math.max(RAIL_MIN_W, Math.min(640, innerWidth * 0.6));
+  railEl.style.width = `${Math.round(Math.max(RAIL_MIN_W, Math.min(max, w)))}px`;
+  placeRailHandle();
+}
+function placeRailHandle() {
+  const r = railEl.getBoundingClientRect();
+  railHandle.style.left = `${r.right - 5}px`;
+  railHandle.style.top = `${r.top}px`;
+  railHandle.style.height = `${r.height}px`;
+}
+new ResizeObserver(placeRailHandle).observe(railEl);
+addEventListener("resize", () => setRailWidth(railEl.getBoundingClientRect().width));
+railHandle.addEventListener("pointerdown", e => {
+  e.preventDefault();
+  railHandle.setPointerCapture(e.pointerId);
+  const startX = e.clientX, startW = railEl.getBoundingClientRect().width;
+  railHandle.classList.add("dragging");
+  document.body.classList.add("resizing-rail");
+  const move = ev => setRailWidth(startW + ev.clientX - startX);
+  const up = () => {
+    railHandle.removeEventListener("pointermove", move);
+    railHandle.classList.remove("dragging");
+    document.body.classList.remove("resizing-rail");
+    try { localStorage.setItem(RAIL_WIDTH_KEY, String(Math.round(railEl.getBoundingClientRect().width))); } catch {}
+  };
+  railHandle.addEventListener("pointermove", move);
+  railHandle.addEventListener("pointerup", up, { once: true });
+  railHandle.addEventListener("pointercancel", up, { once: true });
+});
+railHandle.addEventListener("dblclick", () => {
+  setRailWidth(RAIL_DEFAULT_W);
+  try { localStorage.removeItem(RAIL_WIDTH_KEY); } catch {}
+});
+{
+  let saved = NaN;
+  try { saved = +localStorage.getItem(RAIL_WIDTH_KEY); } catch {}
+  setRailWidth(saved > 0 ? saved : RAIL_DEFAULT_W);
+}
+
 const savedSession = loadSession();
 if (savedSession?.graphPath) {
   loadGraphFromPath(savedSession.graphPath, savedSession).catch(() => {});
