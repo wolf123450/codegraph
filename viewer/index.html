@@ -13,8 +13,8 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
     font: 12px/1.5 var(--mono); overflow: hidden; }
-  svg { display: block; width: 100vw; height: 100vh; cursor: grab; }
-  svg:active { cursor: grabbing; }
+  #graph { display: block; width: 100vw; height: 100vh; cursor: grab; }
+  #graph:active { cursor: grabbing; }
 
   #brand { position: fixed; top: 14px; left: 16px; letter-spacing: .35em;
     font-size: 13px; color: var(--muted); user-select: none; pointer-events: none; }
@@ -82,18 +82,6 @@
   #tooltip .t-sig { color: var(--accent); font-size: 11px; }
   #tooltip .t-desc { max-width: 220px; }
 
-  .hull { stroke-linejoin: round; stroke-linecap: round; pointer-events: none; }
-  .hull-label { fill: var(--muted); font-size: 11px; letter-spacing: .2em;
-    text-transform: uppercase; pointer-events: none; opacity: .75; }
-  .link { fill: none; pointer-events: none; }
-  .link-hit { fill: none; stroke: transparent; stroke-width: 14px; cursor: pointer; }
-  .link.selected { stroke-width: 3.5px !important; stroke-opacity: 1 !important; }
-  .node { cursor: pointer; }
-  .node text { fill: var(--ink); font-size: 10px; pointer-events: none;
-    paint-order: stroke; stroke: var(--bg); stroke-width: 3px; }
-  .node.selected > circle, .node.selected > rect {
-    filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 4px #fff); }
-  .dimmed { opacity: .12; transition: opacity .15s; }
 </style>
 </head>
 <body>
@@ -159,7 +147,7 @@
   <div id="stats"></div>
 </div>
 <div id="tooltip"></div>
-<svg></svg>
+<canvas id="graph"></canvas>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
 <script>
@@ -192,26 +180,85 @@ const EDGE_STYLE = { // stroke, dasharray, base rest-length padding, spring stre
     desc: "A looks up a typed reference to B, e.g. via GetNode<B>() or FindChild<B>()." },
 };
 
-const svg = d3.select("svg");
-const zoomLayer = svg.append("g");
-const hullLayer = zoomLayer.append("g");
-const linkLayer = zoomLayer.append("g");
-const nodeLayer = zoomLayer.append("g");
+// Everything is drawn on one <canvas>: at thousands of nodes/edges, SVG's
+// per-element paint cost made every zoom/pan frame take 100+ ms. d3-force,
+// d3-zoom and d3-drag still drive layout and input; hit-testing is done
+// in JS (quadtree for nodes, point-to-segment distance for edges).
+const canvas = document.getElementById("graph");
+let ctx = canvas.getContext("2d"); // let: benchmarks can point draw() at an offscreen canvas
 const tooltip = document.getElementById("tooltip");
+const MONO = getComputedStyle(document.body).fontFamily;
+const BG = "#0E1116", INK = "#D6DEE8", MUTED = "#7D8895";
+const LABEL_MIN_K = 0.6;  // below this zoom, only big/focused nodes get labels
+const ARROW_MIN_K = 0.3;  // below this zoom, arrowheads are skipped (sub-pixel)
+let transform = d3.zoomIdentity;
+let viewW = innerWidth, viewH = innerHeight, dpr = 1;
+let hoverId = null;
 
-// arrowheads per edge kind
-const defs = svg.append("defs");
-for (const [kind, s] of Object.entries(EDGE_STYLE)) {
-  if (!s.arrow) continue;
-  defs.append("marker").attr("id", `arrow-${kind}`)
-    .attr("viewBox", "0 -4 8 8").attr("refX", 7).attr("markerWidth", 6)
-    .attr("markerHeight", 6).attr("orient", "auto")
-    .append("path").attr("d", "M0,-3.5L8,0L0,3.5").attr("fill", s.color);
+function resizeCanvas() {
+  dpr = window.devicePixelRatio || 1;
+  viewW = innerWidth; viewH = innerHeight;
+  canvas.width = Math.round(viewW * dpr);
+  canvas.height = Math.round(viewH * dpr);
+  requestRedraw();
+}
+addEventListener("resize", resizeCanvas);
+
+let redrawPending = false;
+function requestRedraw() {
+  if (redrawPending) return;
+  redrawPending = true;
+  requestAnimationFrame(() => { redrawPending = false; draw(); });
 }
 
-svg.call(d3.zoom().scaleExtent([0.15, 5])
-  .on("zoom", e => zoomLayer.attr("transform", e.transform)));
-svg.on("click", () => { if (selected) { selected = null; render(); } });
+// Drag is registered before zoom: when the pointer is on a node, drag claims
+// the gesture (and stops propagation); otherwise subject is null and zoom pans.
+function dragSubject(e) {
+  const n = nodeAt(transform.invertX(e.x), transform.invertY(e.y));
+  return n ? { node: n, x: transform.applyX(n.x), y: transform.applyY(n.y) } : null;
+}
+d3.select(canvas)
+  .call(d3.drag().container(canvas).subject(dragSubject)
+    .on("start", e => { if (!e.active) sim.alphaTarget(0.25).restart(); const n = e.subject.node; n.fx = n.x; n.fy = n.y; })
+    .on("drag", e => { const n = e.subject.node; n.fx = transform.invertX(e.x); n.fy = transform.invertY(e.y); })
+    .on("end", e => { if (!e.active) sim.alphaTarget(0); const n = e.subject.node; n.fx = n.fy = null; }))
+  .call(d3.zoom().scaleExtent([0.15, 5])
+    .on("zoom", e => { transform = e.transform; markInteracting(); requestRedraw(); }));
+
+// While a zoom/pan gesture is in progress, drawing drops the expensive
+// details (dashes, arrowheads); they come back shortly after it stops.
+let interacting = false, interactTimer = 0;
+function markInteracting() {
+  interacting = true;
+  clearTimeout(interactTimer);
+  interactTimer = setTimeout(() => { interacting = false; requestRedraw(); }, 150);
+}
+
+function pointerWorld(e) { return transform.invert([e.offsetX, e.offsetY]); }
+canvas.addEventListener("mousemove", e => {
+  const [x, y] = pointerWorld(e);
+  const n = nodeAt(x, y);
+  canvas.style.cursor = (n || edgeAt(x, y)) ? "pointer" : "";
+  const id = n?.id ?? null;
+  if (id !== hoverId) {
+    hoverId = id;
+    if (n) showTooltip(e, n); else tooltip.style.opacity = 0;
+    requestRedraw();
+  } else if (n) moveTooltip(e);
+});
+canvas.addEventListener("mouseleave", () => {
+  if (hoverId !== null) { hoverId = null; requestRedraw(); }
+  tooltip.style.opacity = 0;
+  canvas.style.cursor = "";
+});
+canvas.addEventListener("click", e => {
+  const [x, y] = pointerWorld(e);
+  const n = nodeAt(x, y);
+  if (n) { selectNode(n); return; }
+  const l = edgeAt(x, y);
+  if (l) { selectEdge(l); return; }
+  if (selected) { selected = null; refreshSelection(); }
+});
 
 let sim, nodes = [], links = [], adjacency = new Map();
 const enabledKinds = new Set(Object.keys(EDGE_STYLE));
@@ -243,11 +290,22 @@ function rebuildChargeForce() {
   sim?.alpha(0.4).restart();
 }
 
-function groupsOfNode(id) {
-  const gs = [];
-  for (const [name, members] of groupMembership) if (members.has(id)) gs.push(name);
-  return gs;
+// id -> [group names], rebuilt from groupMembership at the top of every
+// render() (every membership mutation ends in a render()). Forces call
+// groupsOfNode() per node per tick, so it must be O(1).
+let nodeGroups = new Map();
+const NO_GROUPS = [];
+function rebuildGroupIndex() {
+  nodeGroups = new Map();
+  for (const [name, members] of groupMembership) {
+    for (const id of members) {
+      let gs = nodeGroups.get(id);
+      if (!gs) nodeGroups.set(id, gs = []);
+      gs.push(name);
+    }
+  }
 }
+function groupsOfNode(id) { return nodeGroups.get(id) ?? NO_GROUPS; }
 
 function radius(n) {
   if (n.kind === "scene") return 9;
@@ -273,7 +331,7 @@ function build(data) {
   adjacency = new Map(nodes.map(n => [n.id, new Set([n.id])]));
   for (const l of links) { adjacency.get(l.from).add(l.to); adjacency.get(l.to).add(l.from); }
 
-  hiddenNodeIds.clear(); hiddenEdgeKeys.clear(); selected = null;
+  hiddenNodeIds.clear(); hiddenEdgeKeys.clear(); selected = null; hoverId = null;
   nodeChargeOverride = new Map();
 
   groupMembership = new Map();
@@ -316,22 +374,37 @@ function currentGraph() {
   return { activeNodes, activeLinks };
 }
 
+// Per-tick group centroids over the active nodes, shared by the cluster and
+// inter-group forces (both run within the same tick, before positions move).
+let centroidCache = null, centroidStamp = -1, tickCount = 0;
+function groupCentroids(nodesRef) {
+  if (centroidCache && centroidStamp === tickCount) return centroidCache;
+  const acc = new Map();
+  for (const n of nodesRef) {
+    for (const g of groupsOfNode(n.id)) {
+      let c = acc.get(g);
+      if (!c) acc.set(g, c = { x: 0, y: 0, n: 0 });
+      c.x += n.x; c.y += n.y; c.n++;
+    }
+  }
+  for (const c of acc.values()) { c.x /= c.n; c.y /= c.n; }
+  centroidCache = acc; centroidStamp = tickCount;
+  return acc;
+}
+
 // gentle pull toward the (average, if in several) centroid of a node's groups,
 // so bubbles self-segregate; no-ops entirely when "group bubbles" is unchecked.
 function clusterForce(strength) {
   let nodesRef;
   function force(alpha) {
     if (!groupBubbles) return;
-    const centroidOf = new Map();
-    for (const [name, members] of groupMembership) {
-      const memberNodes = nodesRef.filter(n => members.has(n.id));
-      if (memberNodes.length) centroidOf.set(name, { x: d3.mean(memberNodes, d => d.x), y: d3.mean(memberNodes, d => d.y) });
-    }
+    const cents = groupCentroids(nodesRef);
     for (const n of nodesRef) {
-      const gs = groupsOfNode(n.id).filter(g => centroidOf.has(g));
+      const gs = groupsOfNode(n.id);
       if (!gs.length) continue;
-      const cx = d3.mean(gs, g => centroidOf.get(g).x);
-      const cy = d3.mean(gs, g => centroidOf.get(g).y);
+      let cx = 0, cy = 0;
+      for (const g of gs) { const c = cents.get(g); cx += c.x; cy += c.y; }
+      cx /= gs.length; cy /= gs.length;
       n.vx += (cx - n.x) * strength * alpha;
       n.vy += (cy - n.y) * strength * alpha;
     }
@@ -349,18 +422,14 @@ function interGroupForce() {
   let nodesRef;
   function force(alpha) {
     if (!groupBubbles || interGroupScale === 0 || groupMembership.size === 0) return;
-    const centroidOf = new Map();
-    for (const [name, members] of groupMembership) {
-      const memberNodes = nodesRef.filter(n => members.has(n.id));
-      if (memberNodes.length) centroidOf.set(name, { x: d3.mean(memberNodes, d => d.x), y: d3.mean(memberNodes, d => d.y) });
-    }
+    const cents = groupCentroids(nodesRef);
+    const k = interGroupScale * 4000 * alpha;
     for (const n of nodesRef) {
-      const myGroups = new Set(groupsOfNode(n.id));
-      for (const [name, c] of centroidOf) {
-        if (myGroups.has(name)) continue;
+      const mine = groupsOfNode(n.id);
+      for (const [name, c] of cents) {
+        if (mine.includes(name)) continue;
         const dx = n.x - c.x, dy = n.y - c.y;
-        const distSq = Math.max(dx * dx + dy * dy, 100);
-        const f = (interGroupScale * 4000 * alpha) / distSq;
+        const f = k / Math.max(dx * dx + dy * dy, 100);
         n.vx += dx * f;
         n.vy += dy * f;
       }
@@ -370,148 +439,351 @@ function interGroupForce() {
   return force;
 }
 
-let linkSel, nodeSel, hullSel, labelSel;
+let activeLinksCache = [], linkBuckets = [], selectedLink = null;
+let hullShapes = [], quadtree = null;
 
-// Single entry point for any visibility/selection change: recomputes the
-// active node/link sets, feeds them to the simulation (so hidden/filtered
-// items drop out of physics too, not just the drawing), and redraws.
+// Single entry point for any visibility/group change: recomputes the active
+// node/link sets, feeds them to the simulation (so hidden/filtered items drop
+// out of physics too, not just the drawing), and redraws. Pure selection
+// changes go through refreshSelection() instead, so they don't reheat physics.
 function render() {
+  rebuildGroupIndex();
   const { activeNodes, activeLinks } = currentGraph();
 
   sim.nodes(activeNodes);
   sim.force("link", d3.forceLink(activeLinks).id(d => d.id)
     .distance(restLength).strength(l => EDGE_STYLE[l.kind]?.strength ?? 0.4));
 
-  const linkGroups = linkLayer.selectAll("g.linkgrp").data(activeLinks, edgeKey)
-    .join(enter => {
-      const g = enter.append("g").attr("class", "linkgrp");
-      g.append("path").attr("class", "link-hit");
-      g.append("path").attr("class", "link");
-      return g;
-    });
-  linkSel = linkGroups.select(".link")
-    .attr("stroke", l => EDGE_STYLE[l.kind].color)
-    .attr("stroke-dasharray", l => EDGE_STYLE[l.kind].dash)
-    .attr("stroke-width", l => l.kind === "calls" ? Math.min(4, 0.8 + Math.sqrt(l.weight ?? 1) * 0.5) : 1.3)
-    .attr("stroke-opacity", l => l.kind === "calls" ? Math.min(0.85, 0.3 + (l.weight ?? 1) * 0.06) : 0.65)
-    .attr("marker-end", l => EDGE_STYLE[l.kind].arrow ? `url(#arrow-${l.kind})` : null)
-    .classed("selected", l => selected?.type === "edge" && selected.key === edgeKey(l));
-  linkGroups.select(".link-hit")
-    .on("click", (e, d) => { e.stopPropagation(); selectEdge(d); });
+  activeNodes.forEach((n, i) => n._i = i);
+  activeLinksCache = activeLinks;
+  buildLinkBuckets(activeLinks);
+  centroidCache = null; quadtree = null;
+  updateTips();
+  computeHulls();
 
-  nodeSel = nodeLayer.selectAll("g.node").data(activeNodes, n => n.id)
-    .join(enter => {
-      const g = enter.append("g").attr("class", "node");
-      g.each(function (n) {
-        const el = d3.select(this);
-        if (n.kind === "scene") {
-          el.append("rect").attr("x", -n.r).attr("y", -n.r)
-            .attr("width", n.r * 2).attr("height", n.r * 2)
-            .attr("transform", "rotate(45)").attr("rx", 2)
-            .attr("fill", ROLE_META.scene.color).attr("fill-opacity", 0.85);
-        } else if (n.kind === "interface") {
-          el.append("circle").attr("r", n.r).attr("fill", "var(--bg)")
-            .attr("stroke", ROLE_META.interface.color).attr("stroke-width", 2)
-            .attr("stroke-dasharray", "4 3");
-        } else {
-          el.append("circle").attr("r", n.r)
-            .attr("fill", ROLE_META[n.role]?.color ?? ROLE_META.plain.color).attr("fill-opacity", 0.92);
-        }
-        el.append("text").attr("dy", -n.r - 4).attr("text-anchor", "middle").text(n.label);
-      });
-      return g;
-    })
-    .classed("selected", n => selected?.type === "node" && selected.id === n.id)
-    .call(d3.drag()
-      .on("start", (e, d) => { if (!e.active) sim.alphaTarget(0.25).restart(); d.fx = d.x; d.fy = d.y; })
-      .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; })
-      .on("end", (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = d.fy = null; }))
-    .on("mouseenter", (e, d) => { highlight(d); showTooltip(e, d); })
-    .on("mousemove", e => moveTooltip(e))
-    .on("mouseleave", () => { applySelectionHighlight(); tooltip.style.opacity = 0; })
-    .on("click", (e, d) => { e.stopPropagation(); selectNode(d); });
-
-  labelSel = nodeSel.select("text").style("display", showLabels ? null : "none");
   sim.alpha(0.6).restart();
-  applySelectionHighlight();
-  updateSelectionPanel();
+  refreshSelection();
   updateHiddenPanel();
   updateGroupPanel();
   saveSession();
 }
 
+function refreshSelection() {
+  selectedLink = selected?.type === "edge"
+    ? activeLinksCache.find(l => edgeKey(l) === selected.key) ?? null : null;
+  updateSelectionPanel();
+  requestRedraw();
+}
+
+// Links are drawn in batches sharing one stroke style (one Path2D per batch),
+// which is what keeps ~10k+ edges cheap to redraw.
+function buildLinkBuckets(activeLinks) {
+  const byKey = new Map();
+  for (const l of activeLinks) {
+    const s = EDGE_STYLE[l.kind];
+    const w = l.kind === "calls" ? Math.min(4, 0.8 + Math.sqrt(l.weight ?? 1) * 0.5) : 1.3;
+    const a = l.kind === "calls" ? Math.min(0.85, 0.3 + (l.weight ?? 1) * 0.06) : 0.65;
+    const key = `${l.kind}|${w.toFixed(2)}|${a.toFixed(2)}`;
+    let b = byKey.get(key);
+    if (!b) byKey.set(key, b = { style: s, w, a, dash: s.dash ? s.dash.split(" ").map(Number) : [], links: [] });
+    b.links.push(l);
+  }
+  linkBuckets = Array.from(byKey.values());
+}
+
 function tick() {
-  linkLayer.selectAll("g.linkgrp path")
-    .attr("d", l => `M${l.source.x},${l.source.y}L${edgeTip(l).x},${edgeTip(l).y}`);
-  nodeSel.attr("transform", n => `translate(${n.x},${n.y})`);
-  drawHulls();
+  tickCount++;
+  quadtree = null;
+  updateTips();
+  requestRedraw(); // hulls are recomputed lazily, at most once per drawn frame
 }
 
-// shorten line so arrowheads sit on the node rim
-function edgeTip(l) {
-  const dx = l.target.x - l.source.x, dy = l.target.y - l.source.y;
-  const dist = Math.hypot(dx, dy) || 1;
-  const cut = EDGE_STYLE[l.kind].arrow ? l.target.r + 3 : 0;
-  return { x: l.target.x - dx / dist * cut, y: l.target.y - dy / dist * cut };
+// shorten each line so arrowheads sit on the node rim (stored as l.tx/l.ty)
+function updateTips() {
+  for (const l of activeLinksCache) {
+    const s = l.source, t = l.target;
+    const dx = t.x - s.x, dy = t.y - s.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    const cut = EDGE_STYLE[l.kind].arrow ? t.r + 3 : 0;
+    l.tx = t.x - dx / dist * cut;
+    l.ty = t.y - dy / dist * cut;
+  }
 }
 
+// Bubbles are two filled hulls: the members' own hull (fill) and one grown by
+// HULL_PAD (the soft rim). The SVG version stroked the hull 46px wide, but a
+// wide canvas stroke on a long curved path is very slow to rasterize; filling
+// a padded hull looks the same and is cheap.
 const hullLine = d3.line().curve(d3.curveCatmullRomClosed);
-function drawHulls() {
-  if (!groupBubbles) { hullLayer.selectAll("*").remove(); return; }
-  const activeNodes = sim.nodes();
-  const shapes = [];
-  for (const [name, members] of groupMembership) {
-    if (hiddenGroupBubbles.has(name)) continue;
-    const memberNodes = activeNodes.filter(n => members.has(n.id));
-    if (memberNodes.length < 2) continue;
-    const pts = memberNodes.flatMap(n => [
-      [n.x - n.r, n.y], [n.x + n.r, n.y], [n.x, n.y - n.r], [n.x, n.y + n.r]]);
-    const hull = d3.polygonHull(pts) ?? pts;
-    shapes.push({ name, hull, top: d3.least(memberNodes, n => n.y - n.r) });
+const HULL_PAD = 23;
+const HULL_DIRS = d3.range(8).map(i => [Math.cos(i * Math.PI / 4), Math.sin(i * Math.PI / 4)]);
+let hullTick = -1;
+function computeHulls() {
+  hullShapes = [];
+  hullTick = tickCount;
+  if (!groupBubbles || !sim) return;
+  const byGroup = new Map();
+  for (const n of sim.nodes()) {
+    for (const g of groupsOfNode(n.id)) {
+      if (hiddenGroupBubbles.has(g)) continue;
+      let ms = byGroup.get(g);
+      if (!ms) byGroup.set(g, ms = []);
+      ms.push(n);
+    }
   }
-  hullLayer.selectAll("path").data(shapes, s => s.name).join("path")
-    .attr("class", "hull")
-    .attr("d", s => hullLine(s.hull))
-    .attr("fill", s => groupColor(s.name)).attr("fill-opacity", 0.07)
-    .attr("stroke", s => groupColor(s.name)).attr("stroke-opacity", 0.12)
-    .attr("stroke-width", 46);
-  hullLayer.selectAll("text").data(shapes, s => s.name).join("text")
-    .attr("class", "hull-label")
-    .attr("x", s => d3.polygonCentroid(s.hull)[0])
-    .attr("y", s => Math.min(...s.hull.map(p => p[1])) - 34)
-    .attr("text-anchor", "middle")
-    .text(s => s.name);
+  for (const name of groupMembership.keys()) {
+    const ms = byGroup.get(name);
+    if (!ms || ms.length < 2) continue;
+    const inner = [], outer = [];
+    for (const n of ms) {
+      inner.push([n.x - n.r, n.y], [n.x + n.r, n.y], [n.x, n.y - n.r], [n.x, n.y + n.r]);
+      const R = n.r + HULL_PAD;
+      for (const [cx, cy] of HULL_DIRS) outer.push([n.x + cx * R, n.y + cy * R]);
+    }
+    const hull = d3.polygonHull(inner) ?? inner;
+    const rim = d3.polygonHull(outer) ?? outer;
+    hullShapes.push({
+      name, color: groupColor(name),
+      // rim = padded hull minus the hull itself (even-odd), i.e. just the band
+      fill: new Path2D(hullLine(hull)), rim: new Path2D(hullLine(rim) + hullLine(hull)),
+      cx: d3.polygonCentroid(hull)[0], top: d3.min(hull, p => p[1]) - 34,
+    });
+  }
+}
+// Recomputes bubble shapes (e.g. after toggling one) and redraws.
+function drawHulls() { computeHulls(); requestRedraw(); }
+
+// ---------------------------------------------------------------- hit-testing
+function hitsNode(n, x, y) {
+  const dx = Math.abs(x - n.x), dy = Math.abs(y - n.y);
+  return n.kind === "scene" ? dx + dy <= n.r * Math.SQRT2 : dx * dx + dy * dy <= n.r * n.r;
+}
+// Topmost (last-drawn) node under a world-space point, or null.
+function nodeAt(x, y) {
+  if (!sim) return null;
+  if (!quadtree) quadtree = d3.quadtree(sim.nodes(), d => d.x, d => d.y);
+  const R = 34 * Math.SQRT2;
+  let best = null;
+  quadtree.visit((q, x0, y0, x1, y1) => {
+    if (!q.length) {
+      let leaf = q;
+      do {
+        const n = leaf.data;
+        if (hitsNode(n, x, y) && (!best || n._i > best._i)) best = n;
+      } while ((leaf = leaf.next));
+    }
+    return x0 > x + R || x1 < x - R || y0 > y + R || y1 < y - R;
+  });
+  return best;
+}
+// Nearest edge within 7 screen px of a world-space point, or null.
+function edgeAt(x, y) {
+  const tol = 7 / transform.k;
+  let best = null, bestD = tol * tol;
+  for (const l of activeLinksCache) {
+    const sx = l.source.x, sy = l.source.y, tx = l.tx, ty = l.ty;
+    if (x < Math.min(sx, tx) - tol || x > Math.max(sx, tx) + tol ||
+        y < Math.min(sy, ty) - tol || y > Math.max(sy, ty) + tol) continue;
+    const dx = tx - sx, dy = ty - sy, len2 = dx * dx + dy * dy || 1;
+    const t = Math.max(0, Math.min(1, ((x - sx) * dx + (y - sy) * dy) / len2));
+    const ex = sx + t * dx - x, ey = sy + t * dy - y, d2 = ex * ex + ey * ey;
+    if (d2 <= bestD) { bestD = d2; best = l; }
+  }
+  return best;
 }
 
-function highlight(d) {
-  const near = adjacency.get(d.id);
-  nodeSel.classed("dimmed", n => !near.has(n.id));
-  linkSel.classed("dimmed", l => l.from !== d.id && l.to !== d.id);
+// -------------------------------------------------------------------- drawing
+// Canvas performance notes (measured in Chromium, ~13k edges):
+//  - one stroke() per edge is ~30x faster than one huge multi-segment path;
+//  - native dashes and arrowhead fills are the next most expensive things,
+//    so both are dropped below DETAIL_MIN_K (where they'd be sub-pixel anyway)
+//    and during zoom/pan gestures (see markInteracting);
+//  - everything is culled to the viewport.
+const DETAIL_MIN_K = 0.5;
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!sim) return;
+  if (hullTick !== tickCount) computeHulls();
+  const k = transform.k;
+  ctx.setTransform(dpr * k, 0, 0, dpr * k, dpr * transform.x, dpr * transform.y);
+  const view = {
+    x0: transform.invertX(0), x1: transform.invertX(viewW),
+    y0: transform.invertY(0), y1: transform.invertY(viewH),
+  };
+  // hover wins over selection for the "connected nodes" dimming
+  const focusId = hoverId ?? (selected?.type === "node" ? selected.id : null);
+  const near = focusId ? adjacency.get(focusId) ?? null : null;
+
+  drawHullLayer();
+  drawLinkLayer(k, view, near, focusId);
+  drawNodeLayer(view, near);
+  drawLabelLayer(k, view, near, focusId);
+  ctx.globalAlpha = 1;
 }
-function clearHighlight() {
-  nodeSel.classed("dimmed", false);
-  linkSel.classed("dimmed", false);
-}
-// Restores the "connected nodes" dimming for whatever is currently selected
-// (or clears it if nothing is), so it stays active after the mouse leaves --
-// not just while hovering.
-function applySelectionHighlight() {
-  if (selected?.type === "node") {
-    const n = nodes.find(n => n.id === selected.id);
-    if (n) { highlight(n); return; }
+
+function drawHullLayer() {
+  if (!groupBubbles || !hullShapes.length) return;
+  for (const s of hullShapes) {
+    ctx.fillStyle = s.color;
+    ctx.globalAlpha = 0.12; ctx.fill(s.rim, "evenodd");
+    ctx.globalAlpha = 0.07; ctx.fill(s.fill);
   }
-  clearHighlight();
+  ctx.font = `11px ${MONO}`;
+  ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+  if ("letterSpacing" in ctx) ctx.letterSpacing = "2.2px";
+  ctx.fillStyle = MUTED; ctx.globalAlpha = 0.75;
+  for (const s of hullShapes) ctx.fillText(s.name.toUpperCase(), s.cx, s.top);
+  if ("letterSpacing" in ctx) ctx.letterSpacing = "0px";
+}
+
+// Arrowhead at (tx,ty) pointing away from (sx,sy); matches the old SVG
+// marker, which scaled with stroke width.
+function arrowhead(sx, sy, tx, ty, w) {
+  const dx = tx - sx, dy = ty - sy, d = Math.hypot(dx, dy) || 1;
+  const ux = dx / d, uy = dy / d, len = 6 * w, hw = 2.6 * w;
+  const bx = tx - ux * len, by = ty - uy * len;
+  ctx.beginPath();
+  ctx.moveTo(tx, ty);
+  ctx.lineTo(bx - uy * hw, by + ux * hw);
+  ctx.lineTo(bx + uy * hw, by - ux * hw);
+  ctx.fill();
+}
+
+function drawLinkLayer(k, view, near, focusId) {
+  const detail = k >= DETAIL_MIN_K && !interacting;
+  ctx.lineCap = "butt"; ctx.lineJoin = "miter";
+  // dimmed pass first, so focused edges draw on top
+  for (const dimPass of near ? [true, false] : [false]) {
+    for (const b of linkBuckets) {
+      // collect visible links first; then all strokes, then all heads, so
+      // consecutive draw calls share state and batch well
+      const vis = [];
+      for (const l of b.links) {
+        const dim = near !== null && l.from !== focusId && l.to !== focusId;
+        if (dim !== dimPass) continue;
+        const sx = l.source.x, sy = l.source.y, tx = l.tx, ty = l.ty;
+        if ((sx < view.x0 && tx < view.x0) || (sx > view.x1 && tx > view.x1) ||
+            (sy < view.y0 && ty < view.y0) || (sy > view.y1 && ty > view.y1)) continue;
+        vis.push(l);
+      }
+      if (!vis.length) continue;
+      ctx.strokeStyle = ctx.fillStyle = b.style.color;
+      ctx.lineWidth = b.w;
+      ctx.setLineDash(detail ? b.dash : []);
+      ctx.globalAlpha = b.a * (dimPass ? 0.12 : 1);
+      for (const l of vis) {
+        ctx.beginPath(); ctx.moveTo(l.source.x, l.source.y); ctx.lineTo(l.tx, l.ty); ctx.stroke();
+      }
+      if (detail && b.style.arrow) {
+        ctx.globalAlpha = dimPass ? 0.12 : 1;
+        for (const l of vis) arrowhead(l.source.x, l.source.y, l.tx, l.ty, b.w);
+      }
+    }
+  }
+  ctx.setLineDash([]);
+  if (selectedLink) {
+    const l = selectedLink, s = EDGE_STYLE[l.kind];
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = ctx.fillStyle = s.color;
+    ctx.lineWidth = 3.5;
+    ctx.setLineDash(s.dash ? s.dash.split(" ").map(Number) : []);
+    ctx.beginPath(); ctx.moveTo(l.source.x, l.source.y); ctx.lineTo(l.tx, l.ty); ctx.stroke();
+    ctx.setLineDash([]);
+    if (s.arrow) arrowhead(l.source.x, l.source.y, l.tx, l.ty, 1.3);
+  }
+}
+
+function nodeShape(p, n) {
+  if (n.kind === "scene") {
+    const d = n.r * Math.SQRT2;
+    p.moveTo(n.x, n.y - d); p.lineTo(n.x + d, n.y); p.lineTo(n.x, n.y + d); p.lineTo(n.x - d, n.y);
+    p.closePath();
+  } else {
+    p.moveTo(n.x + n.r, n.y); p.arc(n.x, n.y, n.r, 0, 2 * Math.PI);
+  }
+}
+function nodeFill(n) {
+  if (n.kind === "scene") return ROLE_META.scene.color;
+  if (n.kind === "interface") return BG;
+  return ROLE_META[n.role]?.color ?? ROLE_META.plain.color;
+}
+
+function drawNodeLayer(view, near) {
+  const m = 34 * Math.SQRT2;
+  for (const dimPass of near ? [true, false] : [false]) {
+    const fills = new Map(); // color -> Path2D of plain circles
+    const scenes = new Path2D(), ifaces = new Path2D();
+    let anyScene = false, anyIface = false;
+    for (const n of sim.nodes()) {
+      if ((near !== null && !near.has(n.id)) !== dimPass) continue;
+      if (n.x + m < view.x0 || n.x - m > view.x1 || n.y + m < view.y0 || n.y - m > view.y1) continue;
+      if (n.kind === "scene") { nodeShape(scenes, n); anyScene = true; }
+      else if (n.kind === "interface") { nodeShape(ifaces, n); anyIface = true; }
+      else {
+        const c = nodeFill(n);
+        let p = fills.get(c);
+        if (!p) fills.set(c, p = new Path2D());
+        nodeShape(p, n);
+      }
+    }
+    const dimA = dimPass ? 0.12 : 1;
+    ctx.globalAlpha = 0.92 * dimA;
+    for (const [c, p] of fills) { ctx.fillStyle = c; ctx.fill(p); }
+    if (anyScene) { ctx.globalAlpha = 0.85 * dimA; ctx.fillStyle = ROLE_META.scene.color; ctx.fill(scenes); }
+    if (anyIface) {
+      ctx.globalAlpha = dimA;
+      ctx.fillStyle = BG; ctx.fill(ifaces);
+      ctx.strokeStyle = ROLE_META.interface.color; ctx.lineWidth = 2; ctx.setLineDash([4, 3]);
+      ctx.stroke(ifaces); ctx.setLineDash([]);
+    }
+  }
+  if (selected?.type === "node") {
+    const n = sim.nodes().find(n => n.id === selected.id);
+    if (n) {
+      const p = new Path2D(); nodeShape(p, n);
+      ctx.save();
+      ctx.globalAlpha = 1; ctx.shadowColor = "#fff"; ctx.shadowBlur = 8 * dpr;
+      ctx.fillStyle = nodeFill(n); ctx.fill(p); ctx.fill(p);
+      ctx.restore();
+      if (n.kind === "interface") {
+        ctx.strokeStyle = ROLE_META.interface.color; ctx.lineWidth = 2; ctx.setLineDash([4, 3]);
+        ctx.stroke(p); ctx.setLineDash([]);
+      }
+    }
+  }
+}
+
+// Labels are the costliest thing to paint, so they're culled to the viewport
+// and level-of-detailed: all labels at readable zoom, otherwise only big nodes,
+// the hovered/selected node and its neighbours.
+function drawLabelLayer(k, view, near, focusId) {
+  if (!showLabels) return;
+  ctx.font = `10px ${MONO}`;
+  ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+  ctx.lineWidth = 3; ctx.lineJoin = "round";
+  ctx.strokeStyle = BG; ctx.fillStyle = INK;
+  const all = k >= LABEL_MIN_K;
+  for (const n of sim.nodes()) {
+    const inFocus = near !== null && near.has(n.id);
+    if (!all && !inFocus && n.r * k < 12) continue;
+    const y = n.y - n.r - 4;
+    if (n.x + 200 < view.x0 || n.x - 200 > view.x1 || y + 12 < view.y0 || y - 12 > view.y1) continue;
+    ctx.globalAlpha = near !== null && !inFocus ? 0.12 : 1;
+    ctx.strokeText(n.label, n.x, y);
+    ctx.fillText(n.label, n.x, y);
+  }
 }
 
 // ------------------------------------------------------------- selection/hide
 function selectNode(d) {
   selected = (selected?.type === "node" && selected.id === d.id) ? null : { type: "node", id: d.id };
-  render();
+  refreshSelection();
 }
 function selectEdge(d) {
   const key = edgeKey(d);
   selected = (selected?.type === "edge" && selected.key === key) ? null : { type: "edge", key };
-  render();
+  refreshSelection();
 }
 function updateSelectionPanel() {
   const info = document.getElementById("selection-info");
@@ -679,6 +951,7 @@ function createGroupFromInput() {
 }
 
 document.getElementById("export-groups").addEventListener("click", () => {
+  rebuildGroupIndex();
   const groups = {};
   for (const n of nodes) {
     const gs = groupsOfNode(n.id);
@@ -832,7 +1105,7 @@ d3.select("#hulls").on("change", function () {
   saveSession();
 });
 d3.select("#labels").on("change", function () {
-  showLabels = this.checked; labelSel?.style("display", showLabels ? null : "none");
+  showLabels = this.checked; requestRedraw();
   saveSession();
 });
 document.getElementById("charge-val").textContent = chargeScale.toFixed(2);
@@ -956,6 +1229,7 @@ document.getElementById("path-input").addEventListener("keydown", e => {
   if (e.key === "Enter") document.getElementById("path-load-btn").click();
 });
 
+resizeCanvas();
 const savedSession = loadSession();
 if (savedSession?.graphPath) {
   loadGraphFromPath(savedSession.graphPath, savedSession).catch(() => {});

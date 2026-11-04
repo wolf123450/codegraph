@@ -34,6 +34,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         super().do_GET()
 
+    def end_headers(self):
+        # Static files too: without this, browsers heuristically cache
+        # index.html and a plain reload can keep showing an old viewer.
+        if "Cache-Control" not in "".join(map(str, getattr(self, "_headers_buffer", []))):
+            self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+
     def handle_graph(self, parsed):
         params = urllib.parse.parse_qs(parsed.query)
         path = (params.get("path") or [""])[0]
