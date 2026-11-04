@@ -63,7 +63,18 @@
   #hidden-empty { color: var(--muted); font-style: italic; }
 
   .group-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
-  .group-row input[type=checkbox] { margin: 0; accent-color: var(--accent); }
+  .group-row input[type=checkbox] { margin: 0; accent-color: var(--accent); width: 13px; height: 13px; flex: none; }
+  .group-row input[type=checkbox]:disabled { opacity: .35; }
+  /* Angled column headers over the per-group checkboxes (spreadsheet-style):
+     each label is rotated from its column's bottom-left corner, so it takes
+     no extra width; the slanted rule under each label points at its column. */
+  #group-head { display: flex; gap: 6px; height: 48px; margin-top: 2px; }
+  #group-head .gh-col { position: relative; width: 13px; flex: none; }
+  #group-head .gh-col span { position: absolute; left: 5px; bottom: 3px; transform-origin: 0 100%;
+    transform: rotate(-55deg); white-space: nowrap; font-size: 9px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--muted); cursor: help; padding: 0 3px 1px 2px;
+    border-bottom: 1px solid #344052; line-height: 1.1; }
+  #group-head .gh-col span:hover { color: var(--ink); border-bottom-color: var(--accent); }
   .group-name { cursor: pointer; flex: 1; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; }
   .group-name.group-name-selected { text-decoration: underline; font-weight: 600; }
@@ -97,6 +108,7 @@
   </details>
   <details class="section" open>
     <summary>Groups</summary>
+    <div id="group-head"></div>
     <div id="group-list"></div>
     <div class="btn-row" style="margin-top:6px">
       <input type="text" id="new-group-name" placeholder="new group name">
@@ -347,6 +359,7 @@ let selected = null; // { type: "node", id } | { type: "edge", key }
 let groupMembership = new Map(); // name -> Set<nodeId>
 let hiddenGroupBubbles = new Set(); // group name -> hull hidden (visual only)
 let hiddenGroupNodes = new Set();   // group name -> members hidden (like a role)
+let unpulledGroups = new Set();     // group name -> no bubble and no group forces; members stay
 let selectedGroup = null;
 const groupColor = d3.scaleOrdinal(d3.schemeTableau10.map(c => c));
 
@@ -409,6 +422,7 @@ function build(data) {
   }
   hiddenGroupBubbles = new Set();
   hiddenGroupNodes = new Set();
+  unpulledGroups = new Set();
   selectedGroup = null;
 
   physics.send({ type: "reset" });
@@ -639,7 +653,8 @@ function sendPhysicsParams() {
 function sendPhysicsGraph() {
   physicsGen++;
   physics.send({ type: "graph", gen: physicsGen,
-    nodes: simNodes.map(n => ({ id: n.id, r: n.r, groups: groupsOfNode(n.id), x: n.x, y: n.y })),
+    nodes: simNodes.map(n => ({ id: n.id, r: n.r, x: n.x, y: n.y,
+      groups: groupsOfNode(n.id).filter(g => !unpulledGroups.has(g)) })),
     links: activeLinksCache.map(l => ({ source: l.from, target: l.to,
       pad: EDGE_STYLE[l.kind]?.pad ?? 50, strength: EDGE_STYLE[l.kind]?.strength ?? 0.4 })) });
 }
@@ -755,7 +770,7 @@ function computeHulls() {
   const byGroup = new Map();
   for (const n of simNodes) {
     for (const g of groupsOfNode(n.id)) {
-      if (hiddenGroupBubbles.has(g)) continue;
+      if (hiddenGroupBubbles.has(g) || unpulledGroups.has(g)) continue;
       let ms = byGroup.get(g);
       if (!ms) byGroup.set(g, ms = []);
       ms.push(n);
@@ -1109,6 +1124,22 @@ function updateHiddenPanel() {
 }
 
 // --------------------------------------------------------------------- groups
+// Column headers for the per-group checkboxes, in the same order as the row.
+const GROUP_COLUMNS = [
+  { label: "bubble", desc: "Show this group's bubble. Visual only: the group still pulls its members together." },
+  { label: "pull", desc: "Group physics. Off: the bubble is hidden and the group no longer pulls its members together or pushes other nodes away, but the members stay visible — e.g. turn off a parent group to see how its child groups lay out on their own." },
+  { label: "nodes", desc: "Show this group's members. Off: they're removed from the view and the physics entirely, like hiding a role." },
+];
+{
+  const head = d3.select("#group-head");
+  for (const c of GROUP_COLUMNS) {
+    head.append("div").attr("class", "gh-col").append("span").text(c.label)
+      .on("mouseenter", e => showDescTooltip(e, c.label, c.desc))
+      .on("mousemove", moveTooltip)
+      .on("mouseleave", () => tooltip.style.opacity = 0);
+  }
+}
+
 function updateGroupPanel() {
   const names = Array.from(groupMembership.keys()).sort();
   const rows = d3.select("#group-list").selectAll("div.group-row").data(names, name => name);
@@ -1118,6 +1149,15 @@ function updateGroupPanel() {
     .on("change", function (e, name) {
       this.checked ? hiddenGroupBubbles.delete(name) : hiddenGroupBubbles.add(name);
       drawHulls();
+    });
+  entered.append("input").attr("type", "checkbox").attr("class", "grp-pull-cb")
+    .on("change", function (e, name) {
+      this.checked ? unpulledGroups.delete(name) : unpulledGroups.add(name);
+      sendPhysicsGraph(); // per-node group lists exclude unpulled groups
+      reheat(0.3);
+      drawHulls();
+      updateGroupPanel();
+      saveSession();
     });
   entered.append("input").attr("type", "checkbox").attr("class", "grp-nodes-cb")
     .on("change", function (e, name) {
@@ -1136,8 +1176,16 @@ function updateGroupPanel() {
     .on("click", (e, name) => deleteGroup(name));
 
   const merged = d3.select("#group-list").selectAll("div.group-row");
-  merged.select(".grp-bubble-cb").property("checked", name => !hiddenGroupBubbles.has(name));
-  merged.select(".grp-nodes-cb").property("checked", name => !hiddenGroupNodes.has(name));
+  merged.order(); // keep sorted DOM order when groups are added
+  merged.select(".grp-bubble-cb")
+    .property("checked", name => !hiddenGroupBubbles.has(name) && !unpulledGroups.has(name))
+    .property("disabled", name => unpulledGroups.has(name))
+    .attr("title", name => unpulledGroups.has(name) ? "bubble hidden: group pull is off" : "show bubble");
+  merged.select(".grp-pull-cb").property("checked", name => !unpulledGroups.has(name))
+    .attr("title", "group pull (physics)");
+  merged.select(".grp-nodes-cb").property("checked", name => !hiddenGroupNodes.has(name))
+    .attr("title", "show members");
+  d3.select("#group-head").style("display", names.length ? null : "none");
   // nested groups ("systems/shipgen") sort right after their parent; show
   // them indented by depth with just their last path segment
   merged.select(".group-name")
@@ -1163,6 +1211,7 @@ function renameGroup(oldName) {
   }
   if (hiddenGroupBubbles.delete(oldName)) hiddenGroupBubbles.add(trimmed);
   if (hiddenGroupNodes.delete(oldName)) hiddenGroupNodes.add(trimmed);
+  if (unpulledGroups.delete(oldName)) unpulledGroups.add(trimmed);
   if (selectedGroup === oldName) selectedGroup = trimmed;
   render();
 }
@@ -1171,6 +1220,7 @@ function deleteGroup(name) {
   groupMembership.delete(name);
   hiddenGroupBubbles.delete(name);
   hiddenGroupNodes.delete(name);
+  unpulledGroups.delete(name);
   if (selectedGroup === name) selectedGroup = null;
   render();
 }
@@ -1248,6 +1298,7 @@ document.getElementById("reset-groups").addEventListener("click", () => {
   }
   hiddenGroupBubbles = new Set();
   hiddenGroupNodes = new Set();
+  unpulledGroups = new Set();
   selectedGroup = null;
   updateGroupPanel();
   render();
@@ -1379,6 +1430,7 @@ function saveSession() {
       groups: Object.fromEntries(Array.from(groupMembership, ([k, v]) => [k, Array.from(v)])),
       hiddenGroupBubbles: Array.from(hiddenGroupBubbles),
       hiddenGroupNodes: Array.from(hiddenGroupNodes),
+      unpulledGroups: Array.from(unpulledGroups),
       nodeChargeOverride: Object.fromEntries(nodeChargeOverride),
       hiddenRoles: Array.from(hiddenRoles),
       disabledKinds: Object.keys(EDGE_STYLE).filter(k => !enabledKinds.has(k)),
@@ -1408,6 +1460,7 @@ function applySavedState(session) {
   }
   hiddenGroupBubbles = new Set((session.hiddenGroupBubbles ?? []).filter(g => groupMembership.has(g)));
   hiddenGroupNodes = new Set((session.hiddenGroupNodes ?? []).filter(g => groupMembership.has(g)));
+  unpulledGroups = new Set((session.unpulledGroups ?? []).filter(g => groupMembership.has(g)));
   nodeChargeOverride = new Map(
     Object.entries(session.nodeChargeOverride ?? {}).filter(([id]) => validIds.has(id)));
 
